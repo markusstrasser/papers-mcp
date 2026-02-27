@@ -17,6 +17,9 @@ dev = ["pytest>=8.0", "respx>=0.22"]
 [project.scripts]
 papers-mcp = "research_mcp.server:main"
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/research_mcp"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
