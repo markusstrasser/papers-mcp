@@ -71,7 +71,7 @@ Convert this PDF to clean, structured markdown. Preserve:
 
 Do NOT summarize. Output the FULL text as markdown."""
 
-EXTRACT_MODEL = "gemini-3-flash-preview"
+EXTRACT_MODEL = "gemini-3.1-flash-lite-preview"
 
 
 def extract_text(pdf_path: Path) -> str:
