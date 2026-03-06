@@ -81,3 +81,58 @@ def test_cache_hit(db):
 
 def test_cache_miss(db):
     assert db.get_cache("nonexistent") is None
+
+
+# --- Sources ---
+
+
+def test_save_and_get_source(db):
+    db.save_source(
+        url="https://example.com/post",
+        title="Example Post",
+        domain="example.com",
+        content="Hello world content",
+        content_hash="abc123",
+    )
+    source = db.get_source("https://example.com/post")
+    assert source is not None
+    assert source["title"] == "Example Post"
+    assert source["domain"] == "example.com"
+    assert source["content"] == "Hello world content"
+    assert source["content_hash"] == "abc123"
+
+
+def test_save_source_updates_existing(db):
+    db.save_source("https://example.com/x", "V1", "example.com", "old content")
+    db.save_source("https://example.com/x", "V2", "example.com", "new content")
+    source = db.get_source("https://example.com/x")
+    assert source["title"] == "V2"
+    assert source["content"] == "new content"
+
+
+def test_list_sources(db):
+    db.save_source("https://a.com/1", "A1", "a.com", "content a")
+    db.save_source("https://b.com/1", "B1", "b.com", "content b")
+    db.save_source("https://a.com/2", "A2", "a.com", "content a2")
+
+    all_sources = db.list_sources()
+    assert len(all_sources) == 3
+
+    a_sources = db.list_sources(domain="a.com")
+    assert len(a_sources) == 2
+    assert all(s["domain"] == "a.com" for s in a_sources)
+
+
+def test_search_sources(db):
+    db.save_source("https://example.com/rust", "Rust Guide", "example.com", "Learn Rust programming")
+    db.save_source("https://example.com/python", "Python Tips", "example.com", "Python best practices")
+
+    results = db.search_sources("Rust")
+    assert len(results) == 1
+    assert results[0]["title"] == "Rust Guide"
+
+    results = db.search_sources("programming")
+    assert len(results) == 1
+
+    results = db.search_sources("example")
+    assert len(results) == 0  # search is on title+content, not domain/url
