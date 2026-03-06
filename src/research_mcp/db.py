@@ -27,6 +27,15 @@ CREATE TABLE IF NOT EXISTS cache (
     response TEXT NOT NULL,
     cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS sources (
+    url TEXT PRIMARY KEY,
+    title TEXT,
+    domain TEXT,
+    content TEXT NOT NULL,
+    content_hash TEXT,
+    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 MIGRATIONS = [
@@ -160,3 +169,43 @@ class PaperDB:
             (key, json.dumps(response)),
         )
         self.conn.commit()
+
+    # --- Sources ---
+
+    def save_source(self, url: str, title: str | None, domain: str | None,
+                    content: str, content_hash: str | None = None) -> None:
+        self.conn.execute(
+            """INSERT OR REPLACE INTO sources (url, title, domain, content, content_hash)
+               VALUES (?, ?, ?, ?, ?)""",
+            (url, title, domain, content, content_hash),
+        )
+        self.conn.commit()
+
+    def get_source(self, url: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM sources WHERE url = ?", (url,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_sources(self, limit: int = 50, domain: str | None = None) -> list[dict[str, Any]]:
+        if domain:
+            rows = self.conn.execute(
+                "SELECT url, title, domain, fetched_at FROM sources WHERE domain = ? ORDER BY fetched_at DESC LIMIT ?",
+                (domain, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT url, title, domain, fetched_at FROM sources ORDER BY fetched_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def search_sources(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
+        pattern = f"%{query}%"
+        rows = self.conn.execute(
+            """SELECT url, title, domain, fetched_at FROM sources
+               WHERE title LIKE ? OR content LIKE ?
+               ORDER BY fetched_at DESC LIMIT ?""",
+            (pattern, pattern, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
