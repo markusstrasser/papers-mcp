@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -16,7 +17,9 @@ from research_mcp.db import PaperDB
 from research_mcp.discovery import SemanticScholar
 from research_mcp.openalex import OpenAlex
 from research_mcp.papers import download_paper, download_url, extract_text
-from research_mcp.cag import ask_corpus
+from research_mcp.cag import ask_corpus, ask_corpus_rcs
+from research_mcp.rcs import prepare_evidence_async
+from research_mcp.extraction import extract_table_async, COLUMN_PRESETS
 from research_mcp.exa_verify import get_exa_client, exa_verify_claim
 
 log = logging.getLogger(__name__)
@@ -59,9 +62,12 @@ def create_mcp(
             "1. search_papers — live S2 search for papers by topic\n"
             "2. save_paper — save a discovered paper to local corpus\n"
             "3. fetch_paper — download PDF and extract full text (Sci-Hub + OA)\n"
-            "4. ask_corpus — ask questions against full-text papers (Gemini 1M context)\n"
-            "5. list_corpus / get_paper — browse saved papers\n"
-            "6. export_for_selve — export for ./selve update to embed into unified index\n\n"
+            "4. prepare_evidence — score paper chunks for relevance (RCS). Use before ask_papers for better synthesis.\n"
+            "5. ask_papers — ask questions against full-text papers (Gemini 1M context). Set use_rcs=True for scored evidence.\n"
+            "6. traverse_citations — discover related papers via S2 citation graph (one hop)\n"
+            "7. extract_table — Elicit-style structured extraction across papers\n"
+            "8. list_corpus / get_paper — browse saved papers\n"
+            "9. export_for_selve — export for ./selve update to embed into unified index\n\n"
             "Web source archiving:\n"
             "- save_source — archive a web page (blog post, docs, news) with its content\n"
             "- get_source — retrieve an archived web source by URL\n"
@@ -244,28 +250,37 @@ def create_mcp(
         }
 
     @mcp.tool()
-    def ask_papers(
+    async def ask_papers(
         ctx: Context,
         question: str,
         paper_ids: list[str] | None = None,
         model: str | None = None,
+        use_rcs: bool = False,
     ) -> dict:
         """Ask a question against full-text papers using Gemini's 1M context.
 
-        Stuffs all paper texts into Gemini's context window (CAG — no chunking,
-        no retrieval, just the full papers). Automatically selects model tier:
-        - gemini-3-flash-preview for large corpus (>30 papers, cheap)
-        - gemini-3-flash-preview for focused queries (<=30 papers, more capable)
+        Two modes:
+        - Default (use_rcs=False): stuffs full paper texts into context (CAG).
+        - RCS (use_rcs=True): scores chunks for relevance first, then synthesizes
+          only the relevant evidence. Higher quality for focused questions.
 
         Args:
             question: Research question. Be specific for best results.
             paper_ids: Optional list of paper IDs to query. If None, uses all papers with text.
-            model: Override model (e.g. 'gemini-3-flash-preview', 'gemini-3-flash-preview').
+            model: Override model (e.g. 'gemini-3-flash-preview').
+            use_rcs: If True, score chunks for relevance before synthesis (slower but more focused).
         """
         db = ctx.lifespan_context["db"]
         papers = db.get_papers_with_text(paper_ids)
         if not papers:
             return {"error": "No papers with full text. Use fetch_paper to download PDFs first."}
+
+        if use_rcs:
+            evidence = await prepare_evidence_async(question, papers)
+            if not evidence:
+                return {"error": "No relevant evidence found after RCS scoring."}
+            return ask_corpus_rcs(question, evidence, model=model)
+
         return ask_corpus(question, papers, model=model)
 
     @mcp.tool()
@@ -343,6 +358,156 @@ def create_mcp(
         """
         db = ctx.lifespan_context["db"]
         return db.list_sources(limit=limit, domain=domain)
+
+    @mcp.tool()
+    async def prepare_evidence(
+        ctx: Context,
+        query: str,
+        paper_ids: list[str] | None = None,
+        min_score: float = 3.0,
+    ) -> dict:
+        """Score paper text chunks for relevance to a research question (RCS).
+
+        Chunks each paper's full text, scores via Gemini Flash, returns sorted
+        summaries with relevance scores. PaperQA2 ablation showed removing this
+        step drops accuracy (p<0.001). Use before ask_papers for better synthesis.
+
+        Args:
+            query: Research question to score relevance against.
+            paper_ids: Papers to process. If None, uses all papers with text.
+            min_score: Minimum relevance score (0-10) to include. Default 3.
+        """
+        db = ctx.lifespan_context["db"]
+        papers = db.get_papers_with_text(paper_ids)
+        if not papers:
+            return {"error": "No papers with full text. Use fetch_paper first."}
+        evidence = await prepare_evidence_async(query, papers, min_score=min_score)
+        return {
+            "query": query,
+            "papers_processed": len(papers),
+            "evidence_chunks": len(evidence),
+            "evidence": evidence,
+        }
+
+    @mcp.tool()
+    def traverse_citations(
+        ctx: Context,
+        paper_ids: list[str],
+        direction: str = "both",
+        auto_save: bool = True,
+        limit: int = 20,
+    ) -> dict:
+        """Discover related papers via S2 citation graph (one hop).
+
+        Finds papers that cite or are cited by the given seed papers.
+        For multiple seeds, applies overlap filtering — papers appearing
+        in multiple citation lists are ranked higher.
+
+        Args:
+            paper_ids: Seed paper IDs to traverse from.
+            direction: "references" (cited by seeds), "citations" (citing seeds), or "both".
+            auto_save: Auto-save discovered papers to corpus. Default True.
+            limit: Max papers to return.
+        """
+        s2 = ctx.lifespan_context["s2"]
+        db = ctx.lifespan_context["db"]
+
+        all_papers = {}
+        paper_seeds: dict[str, set] = {}
+
+        for seed_id in paper_ids:
+            refs = []
+            if direction in ("references", "both"):
+                try:
+                    refs.extend(s2.get_references(seed_id) or [])
+                except RetryError as e:
+                    log.warning("get_references failed for %s: %s", seed_id, e)
+            if direction in ("citations", "both"):
+                try:
+                    refs.extend(s2.get_citations(seed_id) or [])
+                except RetryError as e:
+                    log.warning("get_citations failed for %s: %s", seed_id, e)
+
+            for paper in refs:
+                pid = paper["paper_id"]
+                if pid not in all_papers:
+                    all_papers[pid] = paper
+                    paper_seeds[pid] = set()
+                paper_seeds[pid].add(seed_id)
+
+        # Overlap filtering for multi-seed (PaperQA2: alpha=0.34)
+        min_overlap = math.ceil(0.34 * len(paper_ids))
+
+        filtered = [
+            (pid, paper) for pid, paper in all_papers.items()
+            if len(paper_seeds[pid]) >= min_overlap
+            and pid not in paper_ids  # exclude seeds
+        ]
+
+        # Sort by citation count (descending) and limit
+        filtered.sort(key=lambda x: x[1].get("citation_count", 0), reverse=True)
+        filtered = filtered[:limit]
+
+        # Auto-save
+        saved = 0
+        if auto_save:
+            for pid, paper in filtered:
+                db.upsert_paper(paper)
+                saved += 1
+
+        return {
+            "discovered": len(filtered),
+            "saved": saved,
+            "direction": direction,
+            "seeds": paper_ids,
+            "overlap_threshold": min_overlap,
+            "papers": [
+                {
+                    "paper_id": pid,
+                    "title": paper.get("title", ""),
+                    "year": paper.get("year"),
+                    "citations": paper.get("citation_count", 0),
+                    "found_via": list(paper_seeds[pid]),
+                }
+                for pid, paper in filtered
+            ],
+        }
+
+    @mcp.tool()
+    async def extract_table(
+        ctx: Context,
+        paper_ids: list[str],
+        columns: list[dict] | None = None,
+        preset: str | None = None,
+    ) -> dict:
+        """Extract structured data from papers (Elicit-style comparison table).
+
+        Extracts specified columns from each paper in parallel via Gemini Flash.
+        Returns a table where each row is a paper and columns are the requested fields.
+
+        Args:
+            paper_ids: Papers to extract from.
+            columns: Column definitions, e.g. [{"name": "sample_size", "prompt": "Total sample size (N)"}].
+            preset: Use a preset column set instead: "clinical" (sample_size, study_design, population, main_finding, effect_size).
+        """
+        db = ctx.lifespan_context["db"]
+        papers = db.get_papers_with_text(paper_ids)
+        if not papers:
+            return {"error": "No papers with full text. Use fetch_paper first."}
+
+        if preset and preset in COLUMN_PRESETS:
+            cols = COLUMN_PRESETS[preset]
+        elif columns:
+            cols = columns
+        else:
+            return {"error": "Provide columns or a preset ('clinical')."}
+
+        rows = await extract_table_async(papers, cols)
+        return {
+            "papers_processed": len(papers),
+            "columns": [c["name"] for c in cols],
+            "rows": rows,
+        }
 
     @mcp.tool()
     def verify_claim(ctx: Context, claim: str) -> dict:
