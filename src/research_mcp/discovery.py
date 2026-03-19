@@ -27,6 +27,7 @@ def _is_retryable(exc: BaseException) -> bool:
 class SemanticScholar:
     def __init__(self, db: PaperDB, api_key: str | None = None):
         self.db = db
+        self._has_api_key = bool(api_key)
         headers = {"x-api-key": api_key} if api_key else {}
         self.client = httpx.Client(base_url=S2_BASE, headers=headers, timeout=30)
 
@@ -79,6 +80,66 @@ class SemanticScholar:
         result = self._normalize(resp.json())
         self.db.set_cache(cache_key, result)
         return result
+
+    @retry(
+        stop=stop_after_attempt(4),
+        wait=wait_exponential(min=2, max=30),
+        retry=retry_if_exception(_is_retryable),
+    )
+    def get_references(self, paper_id: str, limit: int = 100) -> list[dict]:
+        """Get papers referenced by (cited in) the given paper."""
+        cache_key = f"refs:{paper_id}:{limit}"
+        cached = self.db.get_cache(cache_key)
+        if cached is not None:
+            return cached
+        if not self._has_api_key:
+            time.sleep(1.1)
+        resp = self.client.get(
+            f"/paper/{paper_id}/references",
+            params={"fields": S2_FIELDS, "limit": limit},
+        )
+        if resp.status_code == 404:
+            return []
+        if not resp.is_success:
+            self._raise_with_backoff(resp)
+        data = resp.json().get("data", [])
+        results = [
+            self._normalize(item["citedPaper"])
+            for item in data
+            if item.get("citedPaper", {}).get("paperId")
+        ]
+        self.db.set_cache(cache_key, results)
+        return results
+
+    @retry(
+        stop=stop_after_attempt(4),
+        wait=wait_exponential(min=2, max=30),
+        retry=retry_if_exception(_is_retryable),
+    )
+    def get_citations(self, paper_id: str, limit: int = 100) -> list[dict]:
+        """Get papers that cite the given paper."""
+        cache_key = f"cites:{paper_id}:{limit}"
+        cached = self.db.get_cache(cache_key)
+        if cached is not None:
+            return cached
+        if not self._has_api_key:
+            time.sleep(1.1)
+        resp = self.client.get(
+            f"/paper/{paper_id}/citations",
+            params={"fields": S2_FIELDS, "limit": limit},
+        )
+        if resp.status_code == 404:
+            return []
+        if not resp.is_success:
+            self._raise_with_backoff(resp)
+        data = resp.json().get("data", [])
+        results = [
+            self._normalize(item["citingPaper"])
+            for item in data
+            if item.get("citingPaper", {}).get("paperId")
+        ]
+        self.db.set_cache(cache_key, results)
+        return results
 
     def _normalize(self, raw: dict) -> dict:
         authors = [a.get("name", "") for a in raw.get("authors", [])]

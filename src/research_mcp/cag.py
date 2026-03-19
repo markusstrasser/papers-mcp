@@ -98,3 +98,68 @@ def ask_corpus(
         "tokens_used": tokens_used,
         "papers_included": included,
     }
+
+
+def ask_corpus_rcs(
+    question: str,
+    evidence: list[dict],
+    model: str | None = None,
+) -> dict:
+    """Answer a question using pre-scored evidence summaries (RCS path).
+
+    Unlike ask_corpus which stuffs full papers, this uses only the scored
+    and summarized chunks from prepare_evidence. More focused, less noise.
+
+    Args:
+        question: Research question.
+        evidence: List of dicts from prepare_evidence (summary, relevance, paper_title).
+        model: Override model selection. If None, uses focused model.
+
+    Returns:
+        dict with 'answer', 'model', 'tokens_used', 'evidence_used'.
+    """
+    if not evidence:
+        return {"answer": "No relevant evidence found.", "model": None, "tokens_used": 0, "evidence_used": 0}
+
+    # Build context from scored summaries
+    parts = []
+    total_chars = 0
+    included = 0
+
+    for e in evidence:
+        entry = f"=== {e['paper_title']} (relevance: {e['relevance']}/10) ===\n{e['summary']}\n\n"
+        if total_chars + len(entry) > MAX_CORPUS_CHARS:
+            break
+        parts.append(entry)
+        total_chars += len(entry)
+        included += 1
+
+    if model is None:
+        model = MODEL_FOCUSED  # RCS already filtered — use focused model
+
+    corpus = "".join(parts)
+    est_tokens = len(corpus) // CHARS_PER_TOKEN + len(question) // CHARS_PER_TOKEN
+
+    logger.info(f"CAG-RCS: {included} evidence chunks, ~{est_tokens:,} tokens, model={model}")
+
+    client = genai.Client()
+    response = client.models.generate_content(
+        model=model,
+        contents=f"Evidence (sorted by relevance):\n\n{corpus}\n\nQuestion: {question}",
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0.2,
+            max_output_tokens=8192,
+        ),
+    )
+
+    answer = response.text or "(empty response)"
+    usage = response.usage_metadata
+    tokens_used = usage.total_token_count if usage else est_tokens
+
+    return {
+        "answer": answer,
+        "model": model,
+        "tokens_used": tokens_used,
+        "evidence_used": included,
+    }
