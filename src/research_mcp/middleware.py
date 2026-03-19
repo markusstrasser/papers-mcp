@@ -10,7 +10,7 @@ log = logging.getLogger("mcp.telemetry")
 
 class TelemetryMiddleware(Middleware):
     async def on_call_tool(self, context: MiddlewareContext, call_next):
-        tool_name = getattr(getattr(context.message, "params", None), "name", "unknown")
+        tool_name = getattr(context.message, "name", "unknown")
         start = time.monotonic()
         try:
             result = await call_next(context)
