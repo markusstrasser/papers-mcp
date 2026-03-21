@@ -1,4 +1,4 @@
-"""MCP telemetry middleware for papers-mcp."""
+"""MCP telemetry middleware for research-mcp."""
 
 import logging
 import time

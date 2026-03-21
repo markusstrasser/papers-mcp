@@ -1,7 +1,7 @@
 [project]
-name = "papers-mcp"
+name = "research-mcp"
 version = "0.2.0"
-description = "Academic paper discovery, full-text extraction, and RAG via MCP"
+description = "Research paper discovery, full-text extraction, evidence synthesis, and RAG via MCP"
 requires-python = ">=3.11"
 dependencies = [
     "fastmcp>=3.0,<4.0",
@@ -16,7 +16,7 @@ dependencies = [
 dev = ["pytest>=8.0", "respx>=0.22"]
 
 [project.scripts]
-papers-mcp = "research_mcp.server:main"
+research-mcp = "research_mcp.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/research_mcp"]
