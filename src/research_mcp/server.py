@@ -23,6 +23,10 @@ from research_mcp.rcs import prepare_evidence_async
 from research_mcp.extraction import extract_table_async, COLUMN_PRESETS
 from research_mcp.exa_verify import get_exa_client, exa_verify_claim
 from research_mcp.preprints import search_preprints as _search_preprints
+from research_mcp.deep_research import (
+    run_deep_research as _run_deep_research,
+    get_deep_research as _get_deep_research,
+)
 
 log = logging.getLogger(__name__)
 
@@ -82,7 +86,10 @@ def create_mcp(
             "Preprint surveillance:\n"
             "- search_preprints — search bioRxiv/medRxiv by date range + keywords (free API, no S2 needed)\n\n"
             "Claim verification:\n"
-            "- verify_claim — verify a factual claim against web sources (Exa /answer, cached 7 days)"
+            "- verify_claim — verify a factual claim against web sources (Exa /answer, cached 7 days)\n\n"
+            "Deep research:\n"
+            "- deep_research — autonomous multi-step web research (~$2-5/query, 2-10 min)\n"
+            "- get_deep_research_status — check/retrieve results of a prior deep_research call"
         ),
         lifespan=lifespan,
     )
@@ -592,6 +599,46 @@ def create_mcp(
             }
 
         return exa_verify_claim(claim, exa, db=db)
+
+    # ── Deep Research ─────────────────────────────────────────────
+
+    @mcp.tool(annotations=_RO, tags={"deep-research"})
+    async def deep_research(
+        ctx: Context,
+        query: str,
+        timeout: int = 600,
+    ) -> dict:
+        """Autonomous multi-step web research via Gemini Deep Research agent.
+
+        Launches an async research job that conducts ~80-160 web searches,
+        reads sources, and produces a synthesis report with citations.
+        Typically completes in 2-10 minutes. Cost: ~$2-5 per query.
+
+        Use for: comprehensive literature surveys, multi-source investigations,
+        questions requiring synthesis across many web sources.
+
+        Do NOT use for: quick factual lookups (use perplexity_ask), single-paper
+        questions (use ask_papers), or time-sensitive queries (<30s needed).
+
+        Args:
+            query: Research question or topic. Be specific for best results.
+            timeout: Max seconds to wait (default 600). Increase for complex topics.
+        """
+        return await _run_deep_research(query, timeout=timeout)
+
+    @mcp.tool(annotations=_RO, tags={"deep-research"})
+    async def get_deep_research_status(
+        ctx: Context,
+        interaction_id: str,
+    ) -> dict:
+        """Check status or retrieve results of a previously started deep research.
+
+        Use after deep_research returns a timeout to check if the job completed.
+
+        Args:
+            interaction_id: The interaction ID from a prior deep_research call.
+        """
+        return await _get_deep_research(interaction_id)
 
     return mcp
 
