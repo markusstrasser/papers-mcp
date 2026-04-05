@@ -447,15 +447,43 @@ def assess_paper(paper_id: str, db) -> PaperQuality:
     q.checks_run.append("publisher_flags")
 
     # -- Compute hard vetoes --
+    # These are high-precision gates. Each veto must have low false-positive rate.
     if q.retracted:
         q.veto_reasons.append("RETRACTED")
+
+    # CANDIDATE_GENE: only for association studies claiming disease risk from a single gene
+    # WITHOUT mechanistic evidence. PGx studies (CYP2D6, CYP3A4, etc.), HLA typing,
+    # and known-mechanism studies (MTHFR enzymatic, OCT1 transport) are NOT candidate gene fallacies.
+    _PGX_GENES = {"cyp", "ugt", "slco", "abcb", "nat", "dpyd", "tpmt", "oct1", "slc22a1",
+                  "hla", "g6pd", "vkorc1", "ifnl", "nudt15"}
     if q.is_candidate_gene:
-        q.veto_reasons.append("CANDIDATE_GENE")
+        title_lower = paper.get("title", "").lower()
+        # Don't veto if it's a pharmacogenomics/transporter/HLA/enzyme study
+        is_pgx = any(gene in title_lower for gene in _PGX_GENES)
+        is_mechanism = any(w in title_lower for w in ("pharmacokinetic", "pharmacogenomic",
+                           "enzyme", "transporter", "metabolism", "catalytic", "kinetic"))
+        if not is_pgx and not is_mechanism:
+            q.veto_reasons.append("CANDIDATE_GENE")
+
+    # NON_HUMAN_ONLY: NOT a hard veto. Animal/in-vitro data transfers well for
+    # conserved pathways (energy metabolism, DNA repair, basic enzymatics) but poorly
+    # for pharmacokinetics, behavioral endpoints, immune responses, and dose extrapolation.
+    # This is case-by-case reasoning that the citing agent handles — the pipeline's job
+    # is to surface the organism, not to auto-veto.
+    # We only flag (not veto) biological animal/in-vitro studies.
+    # Computational papers classified as in_vitro are ignored entirely.
     if q.organism in ("animal", "in_vitro"):
-        q.veto_reasons.append("NON_HUMAN_ONLY")
+        biological_designs = {"RCT", "observational", "case-control", "cohort",
+                              "case-report", "animal-study", "in-vitro"}
+        if q.study_design in biological_designs:
+            q.veto_reasons.append("NON_HUMAN_ONLY")  # informational flag, not hard veto
+
     if q.is_case_report_only:
-        q.veto_reasons.append("CASE_REPORT_ONLY")
-    q.vetoed = len(q.veto_reasons) > 0
+        q.veto_reasons.append("CASE_REPORT_ONLY")  # informational flag
+
+    # Only RETRACTED and CANDIDATE_GENE are hard vetoes.
+    # NON_HUMAN_ONLY and CASE_REPORT_ONLY are informational — the agent decides.
+    q.vetoed = any(r in ("RETRACTED", "CANDIDATE_GENE") for r in q.veto_reasons)
 
     # Cache result
     db.update_paper_quality(paper_id, q.to_json())
