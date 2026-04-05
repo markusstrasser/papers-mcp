@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS sources (
 MIGRATIONS = [
     "ALTER TABLE papers ADD COLUMN pdf_path TEXT",
     "ALTER TABLE papers ADD COLUMN full_text TEXT",
+    "ALTER TABLE papers ADD COLUMN quality_json TEXT",
 ]
 
 
@@ -140,6 +141,20 @@ class PaperDB:
             (pdf_path, full_text, paper_id),
         )
         self.conn.commit()
+
+    def update_paper_quality(self, paper_id: str, quality_json: str) -> None:
+        self.conn.execute(
+            "UPDATE papers SET quality_json = ? WHERE paper_id = ?",
+            (quality_json, paper_id),
+        )
+        self.conn.commit()
+
+    def get_paper_quality(self, paper_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT quality_json FROM papers WHERE paper_id = ? AND quality_json IS NOT NULL",
+            (paper_id,),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
 
     def get_papers_with_text(self, paper_ids: list[str] | None = None) -> list[dict[str, Any]]:
         """Get papers that have full_text extracted."""

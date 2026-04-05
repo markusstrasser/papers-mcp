@@ -367,6 +367,12 @@ def create_mcp(
 
         chars = len(full_text)
         est_tokens = chars // 4
+
+        # Auto-assess quality on fetch (deferred: will be exposed as MCP tool after calibration)
+        # from research_mcp.quality import assess_paper
+        # if target_paper_id:
+        #     assess_paper(target_paper_id, db)
+
         return {
             "paper_id": target_paper_id,
             "pdf": pdf_path.name,
