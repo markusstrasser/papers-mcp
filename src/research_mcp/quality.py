@@ -81,8 +81,14 @@ class PaperQuality:
 
 # -- Mechanical checks --------------------------------------------------------
 
-def check_retraction(doi: str) -> tuple[bool, str]:
-    """Check Crossref for retraction status. Returns (is_retracted, detail)."""
+def check_retraction(doi: str, pmid: str | None = None) -> tuple[bool, str]:
+    """Check Crossref + PubMed for retraction status. Returns (is_retracted, detail).
+
+    Tries Crossref first (structured retraction metadata). Falls back to PubMed
+    if Crossref doesn't have the DOI or misses the retraction.
+    """
+    # --- Crossref ---
+    crossref_miss = False
     try:
         r = httpx.get(
             f"https://api.crossref.org/works/{doi}",
@@ -91,41 +97,93 @@ def check_retraction(doi: str) -> tuple[bool, str]:
         )
     except httpx.HTTPError as e:
         log.warning("Crossref request failed for %s: %s", doi, e)
-        return False, f"Crossref error: {e}"
+        crossref_miss = True
+        r = None
 
-    if r.status_code == 404:
-        return False, "DOI not in Crossref"
-    if r.status_code != 200:
-        return False, f"Crossref HTTP {r.status_code}"
+    if r and r.status_code == 200:
+        try:
+            data = r.json()["message"]
+        except (KeyError, ValueError):
+            data = {}
 
+        # Check update-to with type "retraction"
+        for update in data.get("update-to", []):
+            if update.get("type") == "retraction":
+                return True, f"Retraction via update-to: {update.get('label', 'retracted')}"
+
+        # Check updated-by with type "retraction" or source "retraction-watch"
+        for update in data.get("updated-by", []):
+            if update.get("type") == "retraction" or update.get("source") == "retraction-watch":
+                return True, f"Retraction via updated-by: {update.get('label', 'retracted')} (DOI: {update.get('DOI', '?')})"
+
+        # Check relation.is-retracted-by
+        retracted_by = data.get("relation", {}).get("is-retracted-by", [])
+        if retracted_by:
+            ids = [rb.get("id", "?") for rb in retracted_by]
+            return True, f"Retracted by: {', '.join(ids)}"
+
+        # Check if title starts with "RETRACTED:"
+        for title in data.get("title", []):
+            if isinstance(title, str) and title.upper().startswith("RETRACTED:"):
+                return True, "Title marked as retracted"
+
+    elif r and r.status_code == 404:
+        crossref_miss = True
+
+    # --- PubMed fallback (if Crossref missed or no retraction found) ---
+    resolved_pmid = pmid
+    if not resolved_pmid and not crossref_miss:
+        # Try OpenAlex for PMID
+        try:
+            oa = httpx.get(
+                f"https://api.openalex.org/works/doi:{doi}",
+                headers={"User-Agent": _UA},
+                timeout=_TIMEOUT,
+            )
+            if oa.status_code == 200:
+                ids = oa.json().get("ids", {})
+                pmid_url = ids.get("pmid", "")
+                if pmid_url:
+                    resolved_pmid = pmid_url.split("/")[-1]
+        except Exception:
+            pass
+
+    if resolved_pmid:
+        retracted, detail = _check_pubmed_retraction(resolved_pmid)
+        if retracted:
+            return True, detail
+
+    if crossref_miss and not resolved_pmid:
+        return False, "DOI not in Crossref, no PMID for PubMed fallback"
+
+    return False, ""
+
+
+def _check_pubmed_retraction(pmid: str) -> tuple[bool, str]:
+    """Check PubMed for retraction markers via E-utilities."""
     try:
-        data = r.json()["message"]
-    except (KeyError, ValueError):
-        return False, "Crossref response malformed"
+        r = httpx.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+            params={"db": "pubmed", "id": pmid, "rettype": "xml", "retmode": "xml"},
+            headers={"User-Agent": _UA},
+            timeout=_TIMEOUT,
+        )
+    except httpx.HTTPError as e:
+        log.warning("PubMed request failed for PMID %s: %s", pmid, e)
+        return False, ""
 
-    # Check update-to with type "retraction"
-    for update in data.get("update-to", []):
-        if update.get("type") == "retraction":
-            label = update.get("label", "retracted")
-            return True, f"Retraction via update-to: {label}"
+    if r.status_code != 200:
+        return False, ""
 
-    # Check updated-by with type "retraction" or source "retraction-watch"
-    for update in data.get("updated-by", []):
-        if update.get("type") == "retraction" or update.get("source") == "retraction-watch":
-            label = update.get("label", "retracted")
-            return True, f"Retraction via updated-by: {label} (DOI: {update.get('DOI', '?')})"
-
-    # Check relation.is-retracted-by
-    retracted_by = data.get("relation", {}).get("is-retracted-by", [])
-    if retracted_by:
-        ids = [r.get("id", "?") for r in retracted_by]
-        return True, f"Retracted by: {', '.join(ids)}"
-
-    # Check if title starts with "RETRACTED:"
-    titles = data.get("title", [])
-    for title in titles:
-        if isinstance(title, str) and title.upper().startswith("RETRACTED:"):
-            return True, f"Title marked as retracted"
+    xml = r.text
+    # PubMed marks retractions in PublicationType
+    if "Retracted Publication" in xml:
+        return True, f"PubMed: Retracted Publication (PMID:{pmid})"
+    if "RetractionIn" in xml:
+        return True, f"PubMed: RetractionIn notice (PMID:{pmid})"
+    # Also check CommentsCorrectionsList for retraction notices
+    if "RetractionOf" in xml:
+        return True, f"PubMed: This is a retraction notice (PMID:{pmid})"
 
     return False, ""
 
