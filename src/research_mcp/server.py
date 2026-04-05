@@ -368,12 +368,27 @@ def create_mcp(
         chars = len(full_text)
         est_tokens = chars // 4
 
-        # Auto-assess quality on fetch (deferred: will be exposed as MCP tool after calibration)
-        # from research_mcp.quality import assess_paper
-        # if target_paper_id:
-        #     assess_paper(target_paper_id, db)
+        # Auto-assess quality on fetch
+        quality_card = None
+        if target_paper_id:
+            try:
+                from research_mcp.quality import assess_paper
+                q = assess_paper(target_paper_id, db)
+                quality_card = {
+                    "retracted": q.retracted,
+                    "organism": q.organism,
+                    "study_design": q.study_design,
+                    "sample_size": q.sample_size,
+                    "funding": q.funding_source,
+                    "is_candidate_gene": q.is_candidate_gene,
+                    "vetoed": q.vetoed,
+                    "veto_reasons": q.veto_reasons,
+                }
+            except Exception as e:
+                log.warning("Quality assessment failed for %s: %s", target_paper_id, e)
+                quality_card = {"error": str(e)}
 
-        return {
+        result = {
             "paper_id": target_paper_id,
             "pdf": pdf_path.name,
             "size_mb": round(pdf_path.stat().st_size / 1_048_576, 1),
@@ -381,6 +396,9 @@ def create_mcp(
             "est_tokens": est_tokens,
             "preview": full_text[:500] + "..." if chars > 500 else full_text,
         }
+        if quality_card:
+            result["quality"] = quality_card
+        return result
 
     @mcp.tool(annotations=_RO_LOCAL, tags={"corpus"})
     def read_paper(ctx: Context, paper_id: str) -> dict:
@@ -400,11 +418,21 @@ def create_mcp(
 
     @mcp.tool(annotations=_RO_LOCAL, tags={"corpus"})
     def get_paper(ctx: Context, paper_id: str) -> dict:
-        """Get full details of a saved paper from the local corpus."""
+        """Get full details of a saved paper from the local corpus.
+
+        Includes quality_status: 'assessed' (with quality card) or 'unassessed'.
+        """
         db = ctx.lifespan_context["db"]
         paper = db.get_paper(paper_id)
         if paper is None:
             return {"error": f"Paper {paper_id} not in local corpus"}
+        # Quality-by-default: flag unassessed papers
+        quality = db.get_paper_quality(paper_id)
+        if quality:
+            paper["quality_status"] = "assessed"
+            paper["quality"] = quality
+        else:
+            paper["quality_status"] = "unassessed"
         return paper
 
     @mcp.tool(annotations=_RO_LOCAL, tags={"corpus"})
