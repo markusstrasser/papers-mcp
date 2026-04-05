@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 
@@ -60,6 +61,17 @@ class PaperQuality:
     study_design: str = "unknown"
     sample_size: int | None = None
     is_meta_analysis: bool = False
+    blinding: str = "unclear"  # double-blind | single-blind | open-label | none | unclear
+    control_type: str = "unclear"  # placebo | active-control | waitlist | no-control | unclear
+    is_multicenter: bool | None = None
+    has_effect_size_ci: bool | None = None  # reports CIs, not just p-values
+    data_availability: str = "not-mentioned"  # deposited | on-request | not-mentioned
+    all_hypotheses_confirmed: bool | None = None  # suspicious if True
+    # Mechanical metadata checks
+    has_nct_number: bool = False  # pre-registered on ClinicalTrials.gov
+    nct_number: str = ""
+    author_email_institutional: bool | None = None  # False = gmail/yahoo = paper mill signal
+    publisher_red_flag: str = ""  # "hindawi-retraction-wave" | "mdpi-special-issue" | ""
     # Citation context (on-demand, not implemented yet)
     citation_stance: dict | None = None
     # Hard veto summary
@@ -246,6 +258,64 @@ def check_funding(doi: str) -> tuple[str, list[str]]:
     return "independent", funder_names
 
 
+# -- Mechanical metadata checks -----------------------------------------------
+
+_NCT_RE = re.compile(r'NCT\d{8,11}')
+_FREE_EMAIL_DOMAINS = {"gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "qq.com",
+                       "163.com", "126.com", "mail.ru", "yandex.ru", "protonmail.com"}
+
+# Publishers with documented quality issues
+_PUBLISHER_FLAGS = {
+    "hindawi": "hindawi-retraction-wave",  # Wiley retracted ~11K Hindawi papers 2023-24
+    "mdpi": "mdpi-quality-concerns",  # Guest-edited special issues, some journals delisted
+}
+
+
+def check_preregistration(text: str) -> tuple[bool, str]:
+    """Check for ClinicalTrials.gov NCT number in text."""
+    m = _NCT_RE.search(text)
+    if m:
+        return True, m.group(0)
+    return False, ""
+
+
+def check_author_email(authors_json: str) -> bool | None:
+    """Check if corresponding author uses institutional email.
+
+    Free email (gmail/yahoo) on a research paper = paper mill signal.
+    Returns True=institutional, False=free-email, None=can't determine.
+    """
+    if not authors_json:
+        return None
+    try:
+        authors = json.loads(authors_json) if isinstance(authors_json, str) else authors_json
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    # Look for email in author affiliations or metadata
+    for author in authors if isinstance(authors, list) else []:
+        if not isinstance(author, dict):
+            continue
+        # S2 doesn't always have emails, but affiliations can hint
+        for key in ("email", "affiliations"):
+            val = str(author.get(key, ""))
+            for domain in _FREE_EMAIL_DOMAINS:
+                if domain in val.lower():
+                    return False
+    return None  # Can't determine (no email in metadata)
+
+
+def check_publisher_flags(venue: str) -> str:
+    """Check if publisher has known quality issues."""
+    if not venue:
+        return ""
+    venue_lower = venue.lower()
+    for publisher, flag in _PUBLISHER_FLAGS.items():
+        if publisher in venue_lower:
+            return flag
+    return ""
+
+
 def extract_quality_features(text: str) -> dict:
     """Use Gemini Flash Lite to extract study design, sample size, organism, etc."""
     from google import genai
@@ -258,13 +328,18 @@ def extract_quality_features(text: str) -> dict:
         "{\n"
         '  "study_design": one of "RCT", "observational", "case-control", "cohort", '
         '"meta-analysis", "case-report", "review", "in-vitro", "animal-study", "other",\n'
-        '  "sample_size": integer or null (number of participants/subjects, '
+        '  "sample_size": integer or null (number of human/animal participants/subjects, '
         "NOT number of studies in a meta-analysis),\n"
         '  "is_candidate_gene_study": boolean (true if pre-GWAS-era single gene '
         "association study that does NOT use genome-wide methods),\n"
-        '  "organism": one of "human", "animal", "in_vitro", "mixed" '
-        "(what organism/model was studied),\n"
-        '  "is_meta_analysis": boolean (true if meta-analysis or systematic review)\n'
+        '  "organism": one of "human", "animal", "in_vitro", "mixed",\n'
+        '  "is_meta_analysis": boolean (true if meta-analysis or systematic review),\n'
+        '  "blinding": one of "double-blind", "single-blind", "open-label", "none", "unclear",\n'
+        '  "control_type": one of "placebo", "active-control", "waitlist", "no-control", "unclear",\n'
+        '  "is_multicenter": boolean or null (true if multiple sites/centers),\n'
+        '  "has_effect_size_ci": boolean (true if effect sizes WITH confidence intervals are reported, not just p-values),\n'
+        '  "data_availability": one of "deposited", "on-request", "not-mentioned", "supplementary-only",\n'
+        '  "all_hypotheses_confirmed": boolean (true if every tested hypothesis is reported as significant/confirmed — suspicious if true)\n'
         "}\n\n"
         f"Paper text:\n{truncated}"
     )
@@ -341,9 +416,35 @@ def assess_paper(paper_id: str, db) -> PaperQuality:
         q.organism = features.get("organism", "unknown")
         q.is_meta_analysis = bool(features.get("is_meta_analysis", False))
         q.is_case_report_only = q.study_design == "case-report"
+        # New fields (blinding, control, methodology quality)
+        q.blinding = features.get("blinding", "unclear")
+        q.control_type = features.get("control_type", "unclear")
+        q.is_multicenter = features.get("is_multicenter")
+        q.has_effect_size_ci = features.get("has_effect_size_ci")
+        q.data_availability = features.get("data_availability", "not-mentioned")
+        q.all_hypotheses_confirmed = features.get("all_hypotheses_confirmed")
         q.checks_run.append("flash_lite_extraction")
     else:
         q.missing_fields.append("no_text:feature_extraction_skipped")
+
+    # -- Pre-registration check (NCT number) --
+    search_text = full_text or abstract
+    if search_text:
+        has_nct, nct_id = check_preregistration(search_text)
+        q.has_nct_number = has_nct
+        q.nct_number = nct_id
+        q.checks_run.append("preregistration")
+
+    # -- Author email domain --
+    authors_raw = paper.get("authors", "")
+    q.author_email_institutional = check_author_email(authors_raw)
+    if q.author_email_institutional is not None:
+        q.checks_run.append("author_email")
+
+    # -- Publisher red flags --
+    venue = paper.get("venue", "") or ""
+    q.publisher_red_flag = check_publisher_flags(venue)
+    q.checks_run.append("publisher_flags")
 
     # -- Compute hard vetoes --
     if q.retracted:
