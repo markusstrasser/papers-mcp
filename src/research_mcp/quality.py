@@ -40,7 +40,6 @@ GOV_KEYWORDS = {
 
 _UA = "research-mcp/1.0; mailto:markus@strasser.me"
 _TIMEOUT = httpx.Timeout(10.0)
-_GEMINI_TIMEOUT = httpx.Timeout(30.0)
 
 
 # -- Dataclass ----------------------------------------------------------------
