@@ -109,11 +109,23 @@ def check_retraction(doi: str) -> tuple[bool, str]:
             label = update.get("label", "retracted")
             return True, f"Retraction via update-to: {label}"
 
+    # Check updated-by with type "retraction" or source "retraction-watch"
+    for update in data.get("updated-by", []):
+        if update.get("type") == "retraction" or update.get("source") == "retraction-watch":
+            label = update.get("label", "retracted")
+            return True, f"Retraction via updated-by: {label} (DOI: {update.get('DOI', '?')})"
+
     # Check relation.is-retracted-by
     retracted_by = data.get("relation", {}).get("is-retracted-by", [])
     if retracted_by:
         ids = [r.get("id", "?") for r in retracted_by]
         return True, f"Retracted by: {', '.join(ids)}"
+
+    # Check if title starts with "RETRACTED:"
+    titles = data.get("title", [])
+    for title in titles:
+        if isinstance(title, str) and title.upper().startswith("RETRACTED:"):
+            return True, f"Title marked as retracted"
 
     return False, ""
 
@@ -138,19 +150,24 @@ def check_funding(doi: str) -> tuple[str, list[str]]:
     except ValueError:
         return "unknown", []
 
-    grants = data.get("grants", [])
-    if not grants:
-        return "unknown", []
-
+    # OpenAlex has both top-level "funders" and nested "grants[].funder"
     funder_names = []
-    for g in grants:
-        funder = g.get("funder_display_name") or ""
-        if not funder:
-            # Nested funder object
-            funder_obj = g.get("funder", {})
-            funder = funder_obj.get("display_name", "") if isinstance(funder_obj, dict) else ""
-        if funder:
-            funder_names.append(funder)
+
+    # Top-level funders (most common)
+    for f in data.get("funders", []):
+        name = f.get("display_name", "")
+        if name:
+            funder_names.append(name)
+
+    # Nested grants (fallback)
+    if not funder_names:
+        for g in data.get("grants", []):
+            name = g.get("funder_display_name") or ""
+            if not name:
+                funder_obj = g.get("funder", {})
+                name = funder_obj.get("display_name", "") if isinstance(funder_obj, dict) else ""
+            if name:
+                funder_names.append(name)
 
     if not funder_names:
         return "unknown", []
@@ -197,7 +214,7 @@ def extract_quality_features(text: str) -> dict:
     try:
         client = genai.Client()
         response = client.models.generate_content(
-            model="gemini-2.0-flash-lite",
+            model="gemini-3.1-flash-lite-preview",
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.0,
