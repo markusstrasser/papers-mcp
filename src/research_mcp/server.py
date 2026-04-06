@@ -91,7 +91,16 @@ def create_mcp(
             "- interaction_evidence — search for published evidence of compound-compound interactions (S2)\n\n"
             "Deep research:\n"
             "- deep_research — autonomous multi-step web research (~$2-5/query, 2-10 min)\n"
-            "- get_deep_research_status — check/retrieve results of a prior deep_research call"
+            "- get_deep_research_status — check/retrieve results of a prior deep_research call\n\n"
+            "--- Operational gotchas ---\n"
+            "- S2 effective rate limit is ~1 req/5sec. Surveillance scripts need 4-5s delays.\n"
+            "- S2 hits 403 intermittently. Switch to backend:\"openalex\" for the rest of the session.\n"
+            "- S2 misses landmark papers by keyword. Use backend:\"openalex\" for known-item retrieval.\n"
+            "- S2 returns empty for AI/ML topics. Exa is more reliable for recent AI papers.\n"
+            "- S2 has no date/recency filtering. Use search_preprints for date-bounded searches.\n"
+            "- PMC URLs blocked by CAPTCHA. Use fetch_paper via DOI instead.\n"
+            "- CPIC PDF supplements not parseable. Use CPIC website HTML or Exa.\n"
+            "- JCI DOIs (10.1515/jci-*) don't resolve. Use arXiv URLs directly."
         ),
         lifespan=lifespan,
     )
@@ -286,9 +295,29 @@ def create_mcp(
 
         Use after search_papers to persist interesting results. Fetches full
         metadata from S2 and stores locally.
+
+        Args:
+            paper_id: S2 paper ID (40-char hex hash) or OpenAlex W-prefixed ID.
+                      W-prefixed IDs are resolved via OpenAlex automatically.
         """
         s2 = ctx.lifespan_context["s2"]
+        oa = ctx.lifespan_context["oa"]
         db = ctx.lifespan_context["db"]
+
+        # Detect OpenAlex W-prefixed IDs and resolve via OpenAlex backend
+        if paper_id.startswith("W"):
+            log.info("Detected OpenAlex W-prefixed ID %s, resolving via OpenAlex", paper_id)
+            try:
+                paper = oa.get_paper(paper_id)
+            except RetryError as e:
+                cause = e.last_attempt.exception() if e.last_attempt else e
+                log.warning("OpenAlex get_paper failed: %s", cause)
+                return {"error": f"OpenAlex unavailable. ({cause})"}
+            if paper is None:
+                return {"error": f"Paper {paper_id} not found on OpenAlex"}
+            db.upsert_paper(paper)
+            return {"saved": paper["title"], "paper_id": paper["paper_id"]}
+
         try:
             paper = s2.get_paper(paper_id)
         except RetryError as e:
@@ -347,6 +376,16 @@ def create_mcp(
             else:
                 target_paper_id = doi.replace("/", "_")
                 db.upsert_paper({"paper_id": target_paper_id, "doi": doi, "title": f"DOI: {doi}"})
+
+        if url and not target_paper_id:
+            # URL-only fetch: auto-create corpus entry so read_paper works
+            url_hash = hashlib.md5(url.encode()).hexdigest()[:16]
+            target_paper_id = f"url_{url_hash}"
+            # Extract a readable title from the URL filename
+            url_filename = url.rstrip("/").rsplit("/", 1)[-1]
+            title = url_filename if url_filename else f"URL: {url[:80]}"
+            db.upsert_paper({"paper_id": target_paper_id, "title": title, "open_access_url": url})
+            log.info("Auto-created corpus entry %s for URL %s", target_paper_id, url)
 
         # Download PDF
         pdf_path = None
