@@ -87,6 +87,8 @@ def create_mcp(
             "- search_preprints — search bioRxiv/medRxiv by date range + keywords (free API, no S2 needed)\n\n"
             "Claim verification:\n"
             "- verify_claim — verify a factual claim against web sources (Exa /answer, cached 7 days)\n\n"
+            "Interaction evidence:\n"
+            "- interaction_evidence — search for published evidence of compound-compound interactions (S2)\n\n"
             "Deep research:\n"
             "- deep_research — autonomous multi-step web research (~$2-5/query, 2-10 min)\n"
             "- get_deep_research_status — check/retrieve results of a prior deep_research call"
@@ -662,6 +664,65 @@ def create_mcp(
             }
 
         return exa_verify_with_quote(claim, source_url, exa, db=db)
+
+    # ── Interaction Evidence ──────────────────────────────────────
+
+    @mcp.tool(annotations=_RO, tags={"discovery", "supplements"})
+    def interaction_evidence(
+        ctx: Context,
+        compound_a: str,
+        compound_b: str,
+        limit: int = 10,
+    ) -> dict:
+        """Search for published evidence of interaction between two compounds.
+
+        Queries Semantic Scholar for papers mentioning both compounds together.
+        Returns papers where both appear in title or abstract, with relevance scoring.
+        Useful for supplement-supplement, drug-supplement, or drug-drug interaction checks.
+
+        Args:
+            compound_a: First compound name (e.g. "melatonin", "ashwagandha").
+            compound_b: Second compound name (e.g. "magnesium", "creatine").
+            limit: Max papers to search (default 10, capped at 50).
+        """
+        s2 = ctx.lifespan_context["s2"]
+        capped = min(limit, 50)
+
+        query = f"{compound_a} {compound_b} interaction"
+        try:
+            papers = s2.search(query, limit=capped)
+        except Exception as exc:
+            return {
+                "compound_a": compound_a,
+                "compound_b": compound_b,
+                "error": f"S2 search failed: {type(exc).__name__}",
+                "papers": [],
+            }
+
+        # Filter to papers mentioning both compounds
+        a_lower = compound_a.lower()
+        b_lower = compound_b.lower()
+        hits = []
+        for p in papers:
+            text = f"{p.get('title', '')} {p.get('abstract', '')}".lower()
+            if a_lower in text and b_lower in text:
+                hits.append({
+                    "paper_id": p.get("paperId"),
+                    "title": p.get("title"),
+                    "year": p.get("year"),
+                    "citation_count": p.get("citationCount"),
+                    "doi": (p.get("externalIds") or {}).get("DOI"),
+                    "pmid": (p.get("externalIds") or {}).get("PubMed"),
+                })
+
+        return {
+            "compound_a": compound_a,
+            "compound_b": compound_b,
+            "query": query,
+            "searched": len(papers),
+            "co_mention_hits": len(hits),
+            "papers": hits,
+        }
 
     # ── Deep Research ─────────────────────────────────────────────
 
