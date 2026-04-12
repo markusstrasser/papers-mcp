@@ -416,29 +416,26 @@ def create_mcp(
             try:
                 from research_mcp.quality import assess_paper
                 q = assess_paper(target_paper_id, db)
-                quality_card = {
-                    "retracted": q.retracted,
-                    "organism": q.organism,
-                    "study_design": q.study_design,
-                    "sample_size": q.sample_size,
-                    "funding": q.funding_source,
-                    "is_candidate_gene": q.is_candidate_gene,
-                    "vetoed": q.vetoed,
-                    "veto_reasons": q.veto_reasons,
-                }
+                quality_card = json.loads(q.to_json())
             except Exception as e:
                 log.warning("Quality assessment failed for %s: %s", target_paper_id, e)
                 quality_card = {"error": str(e)}
 
         result = {
             "paper_id": target_paper_id,
+            "doi": resolved_doi,
             "pdf": pdf_path.name,
             "size_mb": round(pdf_path.stat().st_size / 1_048_576, 1),
             "text_chars": chars,
             "est_tokens": est_tokens,
             "preview": full_text[:500] + "..." if chars > 500 else full_text,
         }
+        if target_paper_id:
+            paper_meta = db.get_paper(target_paper_id) or {}
+            if paper_meta.get("title"):
+                result["title"] = paper_meta["title"]
         if quality_card:
+            result["quality_status"] = "assessed"
             result["quality"] = quality_card
         return result
 

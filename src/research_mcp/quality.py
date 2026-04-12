@@ -1,10 +1,11 @@
 """Evidence quality assessment — mechanical checks, not composite grades.
 
 Components:
-  - Crossref retraction check
+  - Crossref retraction check with title-marker fallback
   - OpenAlex funding source lookup
-  - Gemini Flash Lite feature extraction (study design, sample size, organism, candidate gene)
-  - Hard vetoes: RETRACTED, CANDIDATE_GENE, NON_HUMAN_ONLY, CASE_REPORT_ONLY
+  - Deterministic feature extraction with Gemini enrichment when available
+  - Hard vetoes: RETRACTED, CANDIDATE_GENE
+  - Informational flags: NON_HUMAN_ONLY, CASE_REPORT_ONLY
 """
 
 from __future__ import annotations
@@ -41,6 +42,39 @@ GOV_KEYWORDS = {
 
 _UA = "research-mcp/1.0; mailto:markus@strasser.me"
 _TIMEOUT = httpx.Timeout(10.0)
+
+_RETRACTED_TITLE_MARKERS = (
+    "retracted article",
+    "retracted:",
+    "withdrawn:",
+    "withdrawn article",
+)
+
+_ANIMAL_TERMS = (
+    " mouse ", " mice ", " murine ", " rat ", " rats ", " rodent ", " rabbit ",
+    " rabbits ", " zebrafish ", " drosophila ", " c. elegans ", " canine ", " porcine ",
+    " macaque ", " rhesus ", " animal model",
+)
+_IN_VITRO_TERMS = (
+    " in vitro ", " cell line ", " cell culture ", " cultured cells ",
+    " organoid ", " fibroblast ", " hepatocyte ", " lymphoblastoid ",
+)
+_HUMAN_TERMS = (
+    " human ", " humans ", " patient ", " patients ", " participant ", " participants ",
+    " volunteers ", " clinical trial ", " randomized trial ", " cohort ",
+)
+_PGX_HINTS = (
+    "pharmacogen", "pharmacokinetic", "drug metabolism", "transporter", "enzyme",
+    "hla", "cyp", "ugt", "tpmt", "nudt15", "dpyd", "slco", "abcb", "vkorc1", "g6pd",
+)
+_GWAS_HINTS = (
+    "genome-wide", "gwas", "polygenic", "whole-genome", "exome", "transcriptome-wide",
+    "prs", "polygenic risk", "mendelian randomization",
+)
+_ASSOCIATION_HINTS = (
+    "association", "associated with", "polymorphism", "variant", "genotype", "allele",
+    "susceptibility", "risk factor",
+)
 
 
 # -- Dataclass ----------------------------------------------------------------
@@ -192,9 +226,12 @@ def check_retraction(doi: str, pmid: str | None = None) -> tuple[bool, str]:
             ids = [rb.get("id", "?") for rb in retracted_by]
             return True, f"Retracted by: {', '.join(ids)}"
 
-        # Check if title starts with "RETRACTED:"
-        for title in data.get("title", []):
-            if isinstance(title, str) and title.upper().startswith("RETRACTED:"):
+        titles = data.get("title") or []
+        if isinstance(titles, str):
+            titles = [titles]
+        title_text = " ".join(t for t in titles if isinstance(t, str)).lower()
+        if data.get("subtype") != "retraction":
+            if any(marker in title_text for marker in _RETRACTED_TITLE_MARKERS):
                 return True, "Title marked as retracted"
 
     elif r and r.status_code == 404:
@@ -374,12 +411,158 @@ def check_publisher_flags(venue: str) -> str:
     return ""
 
 
+def _normalize_text(text: str) -> str:
+    return f" {re.sub(r'\\s+', ' ', text or '').lower()} "
+
+
+def _find_sample_size(text: str) -> int | None:
+    patterns = (
+        r"\bn\s*=\s*(\d{1,6})\b",
+        r"\b(\d{1,6})\s+(?:patients|participants|subjects|volunteers|individuals|mice|rats|animals)\b",
+    )
+    for pattern in patterns:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                return None
+    return None
+
+
+def _infer_organism(text: str) -> str:
+    norm = _normalize_text(text)
+    has_human = any(term in norm for term in _HUMAN_TERMS)
+    has_animal = any(term in norm for term in _ANIMAL_TERMS)
+    has_in_vitro = any(term in norm for term in _IN_VITRO_TERMS)
+    if has_human and (has_animal or has_in_vitro):
+        return "mixed"
+    if has_human:
+        return "human"
+    if has_animal:
+        return "animal"
+    if has_in_vitro:
+        return "in_vitro"
+    return "unknown"
+
+
+def _infer_study_design(text: str) -> str:
+    norm = _normalize_text(text)
+    if "meta-analysis" in norm or "systematic review" in norm:
+        return "meta-analysis"
+    if "case report" in norm or "case study" in norm:
+        return "case-report"
+    if "randomized" in norm or "randomised" in norm or "double-blind" in norm or "open-label" in norm:
+        return "RCT"
+    if "case-control" in norm:
+        return "case-control"
+    if "cohort" in norm:
+        return "cohort"
+    if "observational" in norm:
+        return "observational"
+    organism = _infer_organism(text)
+    if organism == "in_vitro":
+        return "in-vitro"
+    if organism == "animal":
+        return "animal-study"
+    if "review" in norm:
+        return "review"
+    return "other"
+
+
+def _infer_blinding(text: str) -> str:
+    norm = _normalize_text(text)
+    if "double-blind" in norm or "double blind" in norm:
+        return "double-blind"
+    if "single-blind" in norm or "single blind" in norm:
+        return "single-blind"
+    if "open-label" in norm or "open label" in norm:
+        return "open-label"
+    if "unblinded" in norm or "no blinding" in norm:
+        return "none"
+    return "unclear"
+
+
+def _infer_control_type(text: str) -> str:
+    norm = _normalize_text(text)
+    if "placebo" in norm:
+        return "placebo"
+    if "waitlist" in norm or "wait-list" in norm:
+        return "waitlist"
+    if "active control" in norm or "active comparator" in norm or "standard of care" in norm:
+        return "active-control"
+    if "single-arm" in norm or "single arm" in norm or "uncontrolled" in norm or "no control" in norm:
+        return "no-control"
+    return "unclear"
+
+
+def _infer_data_availability(text: str) -> str:
+    norm = _normalize_text(text)
+    if "available upon request" in norm or "data available on request" in norm:
+        return "on-request"
+    if "deposited in" in norm or "available at geo" in norm or "available in dbgap" in norm or "figshare" in norm or "zenodo" in norm:
+        return "deposited"
+    if "supplementary data" in norm or "supplementary material" in norm:
+        return "supplementary-only"
+    return "not-mentioned"
+
+
+def _infer_candidate_gene(text: str) -> bool:
+    norm = _normalize_text(text)
+    if any(hint in norm for hint in _GWAS_HINTS):
+        return False
+    if any(hint in norm for hint in _PGX_HINTS):
+        return False
+    has_problematic_gene = any(gene.lower() in norm for gene in CANDIDATE_GENES_PROBLEMATIC)
+    has_association_language = any(hint in norm for hint in _ASSOCIATION_HINTS)
+    return has_problematic_gene and has_association_language
+
+
+def _heuristic_quality_features(text: str) -> dict:
+    organism = _infer_organism(text)
+    study_design = _infer_study_design(text)
+    return {
+        "study_design": study_design,
+        "sample_size": _find_sample_size(text),
+        "is_candidate_gene_study": _infer_candidate_gene(text),
+        "organism": organism,
+        "is_meta_analysis": study_design == "meta-analysis",
+        "blinding": _infer_blinding(text),
+        "control_type": _infer_control_type(text),
+        "is_multicenter": True if re.search(r"\b(?:multicenter|multi-center|across \d+ centers)\b", text, re.IGNORECASE) else None,
+        "has_effect_size_ci": True if re.search(r"\b(?:95% ci|confidence interval|confidence intervals)\b", text, re.IGNORECASE) else None,
+        "data_availability": _infer_data_availability(text),
+        "all_hypotheses_confirmed": True if re.search(r"\ball hypotheses (?:were )?(?:supported|confirmed)\b", text, re.IGNORECASE) else None,
+    }
+
+
+def _merge_feature_dicts(base: dict, enriched: dict) -> dict:
+    merged = dict(base)
+    for key, value in enriched.items():
+        if value in ("", "unknown", "unclear", "other", "not-mentioned", None):
+            continue
+        merged[key] = value
+    return merged
+
+
 def extract_quality_features(text: str) -> dict:
-    """Use Gemini Flash Lite to extract study design, sample size, organism, etc."""
+    """Extract study design, sample size, organism, and risk flags.
+
+    Deterministic heuristics run first so the card still exists without model
+    access. Gemini enrichment is optional and only overwrites fields when it
+    returns something more specific than the heuristic baseline.
+    """
+    heuristics = _heuristic_quality_features(text)
+
+    # Skip model enrichment entirely if there is too little text.
+    if not text.strip():
+        return heuristics
+
+    # Use more context than the previous implementation, but still cap cost.
     from google import genai
     from google.genai import types
 
-    truncated = text[:2000] if len(text) > 2000 else text
+    truncated = text[:8000] if len(text) > 8000 else text
 
     prompt = (
         "Extract these fields from the paper text. Return JSON only, no markdown.\n"
@@ -414,13 +597,14 @@ def extract_quality_features(text: str) -> dict:
             ),
         )
         raw = response.text or "{}"
-        return json.loads(raw)
+        enriched = json.loads(raw)
+        return _merge_feature_dicts(heuristics, enriched)
     except json.JSONDecodeError:
         log.warning("Flash Lite returned non-JSON: %s", response.text[:200] if response.text else "(empty)")
-        return {}
+        return heuristics
     except Exception as e:
         log.warning("Flash Lite extraction failed: %s", e)
-        return {}
+        return heuristics
 
 
 # -- Main assessment ----------------------------------------------------------
@@ -440,7 +624,8 @@ def assess_paper(paper_id: str, db) -> PaperQuality:
     doi = paper.get("doi")
     abstract = paper.get("abstract", "") or ""
     full_text = paper.get("full_text", "") or ""
-    text = abstract or full_text
+    text = full_text or abstract
+    combined_text = "\n\n".join(part for part in (paper.get("title", ""), abstract, full_text[:20000]) if part)
 
     q = PaperQuality(
         paper_id=paper_id,
@@ -466,8 +651,8 @@ def assess_paper(paper_id: str, db) -> PaperQuality:
         q.missing_fields.append("doi_missing:funding_check_skipped")
 
     # -- Flash Lite extraction --
-    if text:
-        features = extract_quality_features(text)
+    if combined_text:
+        features = extract_quality_features(combined_text)
         q.study_design = features.get("study_design", "unknown")
         q.sample_size = features.get("sample_size")
         q.is_candidate_gene = bool(features.get("is_candidate_gene_study", False))
@@ -481,7 +666,7 @@ def assess_paper(paper_id: str, db) -> PaperQuality:
         q.has_effect_size_ci = features.get("has_effect_size_ci")
         q.data_availability = features.get("data_availability", "not-mentioned")
         q.all_hypotheses_confirmed = features.get("all_hypotheses_confirmed")
-        q.checks_run.append("flash_lite_extraction")
+        q.checks_run.append("feature_extraction")
     else:
         q.missing_fields.append("no_text:feature_extraction_skipped")
 
@@ -515,7 +700,7 @@ def assess_paper(paper_id: str, db) -> PaperQuality:
     _PGX_GENES = {"cyp", "ugt", "slco", "abcb", "nat", "dpyd", "tpmt", "oct1", "slc22a1",
                   "hla", "g6pd", "vkorc1", "ifnl", "nudt15"}
     if q.is_candidate_gene:
-        title_lower = paper.get("title", "").lower()
+        title_lower = f"{paper.get('title', '')} {abstract}".lower()
         # Don't veto if it's a pharmacogenomics/transporter/HLA/enzyme study
         is_pgx = any(gene in title_lower for gene in _PGX_GENES)
         is_mechanism = any(w in title_lower for w in ("pharmacokinetic", "pharmacogenomic",
