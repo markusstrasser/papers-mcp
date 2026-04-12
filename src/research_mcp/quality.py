@@ -91,6 +91,64 @@ class PaperQuality:
         return cls(**json.loads(raw))
 
 
+# -- DOI resolution -----------------------------------------------------------
+
+def resolve_doi_metadata(doi: str) -> dict:
+    """Resolve a DOI to paper metadata via CrossRef, fallback to Semantic Scholar.
+
+    Returns {doi, title, journal, year, authors, status}.
+    """
+    result = {"doi": doi, "title": "", "journal": "", "year": None, "authors": [], "status": "error"}
+
+    # --- CrossRef ---
+    try:
+        r = httpx.get(
+            f"https://api.crossref.org/works/{doi}",
+            headers={"User-Agent": _UA},
+            timeout=_TIMEOUT,
+        )
+        if r.status_code == 200:
+            msg = r.json().get("message", {})
+            result["title"] = (msg.get("title") or [""])[0]
+            result["journal"] = (msg.get("container-title") or [""])[0]
+            issued = ((msg.get("issued") or {}).get("date-parts") or [[None]])[0]
+            result["year"] = issued[0] if issued else None
+            result["authors"] = [
+                f"{a.get('given', '')} {a.get('family', '')}".strip()
+                for a in (msg.get("author") or [])
+            ]
+            result["status"] = "resolved"
+            return result
+        elif r.status_code == 404:
+            log.info("CrossRef 404 for %s, trying S2", doi)
+        else:
+            log.warning("CrossRef HTTP %d for %s", r.status_code, doi)
+    except httpx.HTTPError as e:
+        log.warning("CrossRef failed for %s: %s", doi, e)
+
+    # --- Semantic Scholar fallback ---
+    try:
+        r = httpx.get(
+            f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}",
+            params={"fields": "title,year,authors,venue"},
+            headers={"User-Agent": _UA},
+            timeout=_TIMEOUT,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            result["title"] = data.get("title", "")
+            result["journal"] = data.get("venue", "")
+            result["year"] = data.get("year")
+            result["authors"] = [a.get("name", "") for a in (data.get("authors") or [])]
+            result["status"] = "resolved"
+            return result
+    except httpx.HTTPError as e:
+        log.warning("S2 fallback failed for %s: %s", doi, e)
+
+    result["status"] = "not_found"
+    return result
+
+
 # -- Mechanical checks --------------------------------------------------------
 
 def check_retraction(doi: str, pmid: str | None = None) -> tuple[bool, str]:

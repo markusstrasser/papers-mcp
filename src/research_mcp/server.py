@@ -22,6 +22,7 @@ from research_mcp.cag import ask_corpus, ask_corpus_rcs
 from research_mcp.rcs import prepare_evidence_async
 from research_mcp.extraction import extract_table_async, COLUMN_PRESETS
 from research_mcp.exa_verify import get_exa_client, exa_verify_claim, exa_verify_with_quote
+from research_mcp.quality import resolve_doi_metadata
 from research_mcp.preprints import search_preprints as _search_preprints
 from research_mcp.deep_research import (
     run_deep_research as _run_deep_research,
@@ -703,6 +704,19 @@ def create_mcp(
             }
 
         return exa_verify_with_quote(claim, source_url, exa, db=db)
+
+    @mcp.tool(annotations=_RO, tags={"verification"})
+    def resolve_doi(doi: str) -> dict:
+        """Resolve a DOI to paper metadata via CrossRef (fallback: Semantic Scholar).
+
+        Returns title, journal, year, and authors. Use to verify that a DOI
+        in a document matches the paper described in surrounding text.
+
+        Args:
+            doi: A DOI string (e.g. "10.1038/s41586-020-2012-7"). No "https://doi.org/" prefix.
+        """
+        doi = doi.strip().removeprefix("https://doi.org/").removeprefix("http://doi.org/")
+        return resolve_doi_metadata(doi)
 
     # ── Interaction Evidence ──────────────────────────────────────
 
