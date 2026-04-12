@@ -706,17 +706,26 @@ def create_mcp(
         return exa_verify_with_quote(claim, source_url, exa, db=db)
 
     @mcp.tool(annotations=_RO, tags={"verification"})
-    def resolve_doi(doi: str) -> dict:
-        """Resolve a DOI to paper metadata via CrossRef (fallback: Semantic Scholar).
+    def resolve_doi(doi: str | None = None, dois: list[str] | None = None) -> dict | list[dict]:
+        """Resolve DOI(s) to paper metadata via CrossRef (fallback: Semantic Scholar).
 
         Returns title, journal, year, and authors. Use to verify that a DOI
         in a document matches the paper described in surrounding text.
 
+        Pass `doi` for a single lookup, or `dois` for batch resolution.
+
         Args:
-            doi: A DOI string (e.g. "10.1038/s41586-020-2012-7"). No "https://doi.org/" prefix.
+            doi: A single DOI string (e.g. "10.1038/s41586-020-2012-7").
+            dois: A list of DOI strings for batch resolution.
         """
-        doi = doi.strip().removeprefix("https://doi.org/").removeprefix("http://doi.org/")
-        return resolve_doi_metadata(doi)
+        def _clean(d: str) -> str:
+            return d.strip().removeprefix("https://doi.org/").removeprefix("http://doi.org/")
+
+        if dois:
+            return [resolve_doi_metadata(_clean(d)) for d in dois]
+        if doi:
+            return resolve_doi_metadata(_clean(doi))
+        return {"error": "Provide either `doi` (single) or `dois` (batch)."}
 
     # ── Interaction Evidence ──────────────────────────────────────
 
