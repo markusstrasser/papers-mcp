@@ -34,6 +34,12 @@ data/papers.db-wal
 data/papers.db-shm
 data/pdfs/
 
+# ---- Local harness/session state ----
+.claude/current-session-id
+.claude/overview.conf
+.claude/overview-marker-*
+.claude/overviews/source-overview.md
+
 # ---- Secrets ----
 .env
 .env.*
