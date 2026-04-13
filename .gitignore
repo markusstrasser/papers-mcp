@@ -28,6 +28,12 @@ __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
 
+# ---- Data (binary, large, rederivable) ----
+data/papers.db
+data/papers.db-wal
+data/papers.db-shm
+data/pdfs/
+
 # ---- Secrets ----
 .env
 .env.*
