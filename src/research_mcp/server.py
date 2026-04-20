@@ -28,6 +28,7 @@ from research_mcp.deep_research import (
     run_deep_research as _run_deep_research,
     get_deep_research as _get_deep_research,
 )
+from research_mcp.cc_ranks import lookup_domain as _cc_lookup
 
 log = logging.getLogger(__name__)
 
@@ -83,7 +84,8 @@ def create_mcp(
             "Web source archiving:\n"
             "- save_source — archive a web page (blog post, docs, news) with its content\n"
             "- get_source — retrieve an archived web source by URL\n"
-            "- list_sources — browse archived web sources, optionally filter by domain\n\n"
+            "- list_sources — browse archived web sources, optionally filter by domain\n"
+            "- grade_domain — look up a domain's authority (Common Crawl harmonic centrality)\n\n"
             "Preprint surveillance:\n"
             "- search_preprints — search bioRxiv/medRxiv by date range + keywords (free API, no S2 needed)\n\n"
             "Claim verification:\n"
@@ -623,7 +625,11 @@ def create_mcp(
         domain = urlparse(url).netloc
         content_hash = hashlib.md5(content.encode()).hexdigest()
         db.save_source(url, title, domain, content, content_hash)
-        return {"url": url, "title": title, "domain": domain, "chars": len(content)}
+        result = {"url": url, "title": title, "domain": domain, "chars": len(content)}
+        rank = _cc_lookup(url)
+        if rank is not None:
+            result["authority"] = {"tier": rank["tier"], "harmonic_pos": rank["harmonic_pos"]}
+        return result
 
     @mcp.tool(annotations=_RO_LOCAL, tags={"sources"})
     def get_source(ctx: Context, url: str) -> dict:
@@ -644,6 +650,30 @@ def create_mcp(
         """
         db = ctx.lifespan_context["db"]
         return db.list_sources(limit=limit, domain=domain)
+
+    @mcp.tool(annotations=_RO_LOCAL, tags={"sources"})
+    def grade_domain(ctx: Context, domain_or_url: str) -> dict:
+        """Look up a domain's authority via Common Crawl's domain ranks.
+
+        Returns harmonic centrality + pagerank position from the latest CC web
+        graph release. Useful as a cheap prior before fetching a web source:
+        a top10k domain is a mainstream site, a tail domain is obscure.
+
+        Requires the ranks parquet cache (one-time ~2.4GB download). If missing,
+        returns a hint to run `just cc-ranks-refresh` in the meta repo.
+
+        Tiers: top10k, top100k, top1m, tail, unranked (not in dataset).
+
+        Args:
+            domain_or_url: A URL, hostname, or bare domain.
+        """
+        result = _cc_lookup(domain_or_url)
+        if result is None:
+            return {
+                "error": "cc_ranks_cache_missing",
+                "hint": "Run `just cc-ranks-refresh` in ~/Projects/agent-infra to populate ~/.cache/cc-domain-ranks/latest.parquet",
+            }
+        return result
 
     # ── Verification ─────────────────────────────────────────────
 
