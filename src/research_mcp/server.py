@@ -371,13 +371,34 @@ def create_mcp(
                     return {"error": f"Paper {paper_id} has no DOI or OA URL."}
 
         if doi and not paper_id:
-            # Search S2 for the DOI, save it
-            results = s2.search(doi, limit=1)
-            if results:
-                target_paper_id = results[0]["paper_id"]
-                db.upsert_paper(results[0])
+            # Always key the corpus row by the REQUESTED DOI so callers can
+            # find what they asked for. S2 enrichment is supplementary and
+            # must not override the primary key.
+            #
+            # Why: s2.search(doi, limit=1) is a fuzzy text search that
+            # routinely returns a similar-but-different paper than the
+            # requested DOI. Worse, the row's `doi` column then gets S2's
+            # canonical-DOI value (which may be a different paper entirely)
+            # while the PDF on disk IS the requested DOI's content. That
+            # mismatch broke 15+ papers in the 2026-05-10 drain prep —
+            # consumers couldn't find what they fetched. Use the DOI-typed
+            # `/paper/DOI:<X>` endpoint for exact lookup, and pin the
+            # primary key + doi field to the requested DOI regardless of
+            # what S2 says.
+            target_paper_id = doi.replace("/", "_")
+            try:
+                s2_paper = s2.get_paper(f"DOI:{doi}")
+            except Exception:
+                s2_paper = None
+            if s2_paper:
+                # Enrich with S2 metadata but override identity fields to
+                # match the requested DOI. The PDF we'll fetch is keyed on
+                # `doi` not `s2_paper["doi"]`, so consistency wins.
+                s2_paper = dict(s2_paper)
+                s2_paper["paper_id"] = target_paper_id
+                s2_paper["doi"] = doi
+                db.upsert_paper(s2_paper)
             else:
-                target_paper_id = doi.replace("/", "_")
                 db.upsert_paper({"paper_id": target_paper_id, "doi": doi, "title": f"DOI: {doi}"})
 
         if url and not target_paper_id:
