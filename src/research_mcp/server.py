@@ -19,6 +19,11 @@ from research_mcp.discovery import SemanticScholar
 from research_mcp.openalex import OpenAlex
 from research_mcp.papers import download_paper, download_url, extract_text
 from corpus_core import store as paper_store
+from corpus_core.annotate import (
+    AnnotationError,
+    AnnotationTooLargeError,
+    annotate as corpus_annotate,
+)
 from research_mcp.cag import ask_corpus, ask_corpus_rcs
 from research_mcp.rcs import prepare_evidence_async
 from research_mcp.extraction import extract_table_async, COLUMN_PRESETS
@@ -444,6 +449,27 @@ def create_mcp(
                 return {"error": f"Could not download PDF for doi={resolved_doi} url={url}"}
 
             pdf_path = paper_store.paper_path(store_paper_id) / "paper.pdf"
+
+            # Phase 1 (substrate-migration plan): every fetch leaves a corpus
+            # annotation. corpus_core.annotate is the SOLE writer of
+            # annotations.jsonl across the codebase.
+            try:
+                pdf_sha = (
+                    paper_store.sha256_file(pdf_path) if pdf_path.exists() else None
+                )
+                corpus_annotate(
+                    store_paper_id,
+                    repo="research-mcp",
+                    actor_type="service",
+                    actor_id="urn:agent:service:research-mcp@0.2.0",
+                    scope="raw_fetch",
+                    source_content_hash=pdf_sha,
+                    output_uri=f"corpus://{store_paper_id}/paper.pdf",
+                    output_hash=pdf_sha,
+                )
+            except (AnnotationError, AnnotationTooLargeError) as exc:
+                # Annotation failure must NOT break the fetch.
+                log.warning("corpus annotate failed for %s: %s", store_paper_id, exc)
 
             # Extract text — prefers parsed/paper.md, falls back to Gemini/PyMuPDF.
             full_text = extract_text(store_paper_id)

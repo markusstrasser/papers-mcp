@@ -288,17 +288,22 @@ version = "0.1.0"
 source = { editable = "../agent-infra/scripts/corpus/packages/corpus-core" }
 dependencies = [
     { name = "duckdb" },
+    { name = "jsonschema" },
     { name = "pypdf" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "duckdb", specifier = ">=1.0" },
+    { name = "jsonschema", specifier = ">=4.20" },
     { name = "pypdf", specifier = ">=4.0" },
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=9.0.3" }]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3" },
+    { name = "rfc8785", specifier = ">=0.1.4" },
+]
 
 [[package]]
 name = "cryptography"
