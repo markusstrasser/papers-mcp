@@ -11,11 +11,11 @@ dependencies = [
     "google-genai>=1.0",
     "exa-py>=2.6",
     "duckdb>=1.0",
-    "papers",
+    "corpus-core",
 ]
 
 [tool.uv.sources]
-papers = { path = "../agent-infra/scripts/papers", editable = true }
+corpus-core = { path = "../agent-infra/scripts/corpus/packages/corpus-core", editable = true }
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "respx>=0.22"]

@@ -18,7 +18,7 @@ from research_mcp.db import PaperDB
 from research_mcp.discovery import SemanticScholar
 from research_mcp.openalex import OpenAlex
 from research_mcp.papers import download_paper, download_url, extract_text
-from papers import paper_store
+from corpus_core import store as paper_store
 from research_mcp.cag import ask_corpus, ask_corpus_rcs
 from research_mcp.rcs import prepare_evidence_async
 from research_mcp.extraction import extract_table_async, COLUMN_PRESETS
@@ -33,7 +33,7 @@ from research_mcp.cc_ranks import lookup_domain as _cc_lookup
 
 log = logging.getLogger(__name__)
 
-DEFAULT_DATA_DIR = Path.home() / "Projects" / "papers"
+DEFAULT_DATA_DIR = Path.home() / "Projects" / "corpus"
 DEFAULT_SELVE_ROOT = Path.home() / "Projects" / "selve"
 
 # -- Annotation presets --
@@ -431,7 +431,7 @@ def create_mcp(
                 log.info("Auto-created corpus entry %s for URL %s", target_paper_id, url)
 
             # Download PDF → canonical store. download_paper/download_url
-            # ingest into ~/Projects/papers/ and return a store paper_id
+            # ingest into ~/Projects/corpus/ and return a store paper_id
             # (distinct from target_paper_id, which is the corpus row key).
             store_paper_id = None
             if resolved_doi:

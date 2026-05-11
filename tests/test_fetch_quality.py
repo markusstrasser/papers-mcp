@@ -1,7 +1,7 @@
-"""fetch_paper end-to-end test against the canonical papers store.
+"""fetch_paper end-to-end test against the canonical corpus store.
 
-Tests the new (paper_id-returning) download_paper / download_url / extract_text
-signatures introduced in Phase 3 of plans/2026-05-11-shared-papers-store.md.
+Tests the (paper_id-returning) download_paper / download_url / extract_text
+signatures.
 """
 import json
 from pathlib import Path
@@ -11,8 +11,8 @@ import pytest
 import respx
 from fastmcp import Client
 
-from papers import paper_store as ps
-from papers.ingest import ingest_pdf
+from corpus_core import store as ps
+from corpus_core.ingest import ingest_pdf
 
 from research_mcp.discovery import S2_BASE
 from research_mcp.server import create_mcp
@@ -44,18 +44,18 @@ def selve_root(tmp_path):
 
 
 @pytest.fixture
-def papers_root(tmp_path, monkeypatch):
-    """Redirect the canonical papers store to a per-test tmpdir."""
-    root = tmp_path / "papers"
+def corpus_root(tmp_path, monkeypatch):
+    """Redirect the canonical corpus store to a per-test tmpdir."""
+    root = tmp_path / "corpus"
     root.mkdir()
-    monkeypatch.setenv("PAPERS_ROOT", str(root))
+    monkeypatch.setenv("CORPUS_ROOT", str(root))
     # AUTO_PARSE=0 keeps marker out of unit tests
     monkeypatch.setenv("RESEARCH_MCP_AUTO_PARSE", "0")
     return root
 
 
 @pytest.fixture
-def mcp(data_dir, selve_root, papers_root):
+def mcp(data_dir, selve_root, corpus_root):
     return create_mcp(data_dir=data_dir, selve_root=selve_root)
 
 
@@ -77,7 +77,7 @@ def _seed_paper(doi: str, text: str) -> str:
 
 @pytest.mark.anyio
 @respx.mock
-async def test_fetch_paper_returns_and_persists_quality(mcp, monkeypatch, papers_root):
+async def test_fetch_paper_returns_and_persists_quality(mcp, monkeypatch, corpus_root):
     doi = "10.1234/test"
     extracted = (
         "Association of 5-HTTLPR polymorphism with depression risk in 250 patients. "

@@ -1,9 +1,9 @@
 """Paper PDF download (Sci-Hub + OA) and full-text extraction.
 
-The canonical papers store at ~/Projects/papers/ owns PDFs and parsed text.
+The canonical corpus store at ~/Projects/corpus/ owns PDFs and parsed text.
 This module is a thin shim: it fetches bytes from the network, hands them to
-`papers.paper_store` for ingestion, and returns a `paper_id`. Downstream code
-resolves `paper_id` → on-disk path via `paper_store.paper_path()`.
+`corpus_core.store` for ingestion, and returns a `paper_id`. Downstream code
+resolves `paper_id` → on-disk path via `corpus_core.store.paper_path()`.
 
 Extraction pipeline (in order):
   1. Marker output: parsed/paper.md if ingested with parse
@@ -23,8 +23,8 @@ from typing import Optional
 from google import genai
 from google.genai import types
 
-from papers import paper_store as ps
-from papers.ingest import ingest_pdf
+from corpus_core import store as ps
+from corpus_core.ingest import ingest_pdf
 
 logger = logging.getLogger(__name__)
 
