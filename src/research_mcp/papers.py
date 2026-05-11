@@ -20,9 +20,6 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-from google import genai
-from google.genai import types
-
 from corpus_core import store as ps
 from corpus_core.ingest import ingest_pdf
 
@@ -146,73 +143,42 @@ def _ingest(pdf_path: Path, **id_fields) -> Optional[str]:
         return None
 
 
-_EXTRACT_PROMPT = """\
-Convert this PDF to clean, structured markdown. Preserve:
-- Section headings (##, ###)
-- Tables (as markdown tables)
-- Figure/table captions (as **Figure N:** / **Table N:**)
-- Equations (as LaTeX in $...$ or $$...$$)
-- Reference list at the end
-- All text content faithfully
-
-Do NOT summarize. Output the FULL text as markdown."""
-
-EXTRACT_MODEL = "gemini-3.1-flash-lite-preview"
-
-
 def extract_text(paper_id: str) -> str:
     """Return full-text markdown for ``paper_id``.
 
-    Resolution order:
-      1. ``parsed/paper.md`` (marker output from ingest), if present
-      2. Gemini Flash-Lite on ``paper.pdf``
-      3. PyMuPDF raw text on ``paper.pdf`` (last-resort)
+    Resolution order (Phase 1.5 of substrate-migration plan):
+      1. Any ``parsed.<parser_id>/page.md`` from a local extractor (mineru,
+         pymupdf4llm, trafilatura) — first found wins.
+      2. corpus_core.extract.pdf_llm fallback (Gemini Flash-Lite).
+      3. PyMuPDF raw text — last-resort offline.
     """
     rec = ps.get(paper_id)  # raises PaperNotFoundError on miss
-    parsed_md = rec.parsed_dir / "paper.md"
-    if parsed_md.exists():
-        text = parsed_md.read_text(encoding="utf-8", errors="replace")
-        if text.strip():
-            return text
-        logger.warning("parsed/paper.md is empty for %s; falling back", paper_id)
+
+    # 1. Any local parsed.<parser_id>/page.md
+    for child in sorted(rec.path.iterdir()):
+        if child.is_dir() and child.name.startswith("parsed."):
+            md = child / "page.md"
+            if md.exists():
+                text = md.read_text(encoding="utf-8", errors="replace")
+                if text.strip():
+                    return text
 
     pdf_path = rec.pdf_path
     if not pdf_path.exists():
         raise FileNotFoundError(f"No paper.pdf for {paper_id} at {pdf_path}")
 
+    # 2. Gemini fallback via corpus_core (sole owner of LLM extraction now)
     try:
-        return _extract_with_gemini(pdf_path)
+        from corpus_core.extract import pdf_llm
+        result = pdf_llm.extract(pdf_path)
+        if len(result.parsed_markdown) >= 100:
+            return result.parsed_markdown
+        logger.warning("LLM fallback returned too little text for %s", paper_id)
     except Exception as e:
-        logger.warning("Gemini extraction failed for %s, falling back to pymupdf: %s", paper_id, e)
-        return _extract_with_pymupdf(pdf_path)
+        logger.warning("LLM fallback failed for %s: %s", paper_id, e)
 
-
-def _extract_with_gemini(pdf_path: Path) -> str:
-    """Upload PDF to Gemini Flash-Lite → structured markdown."""
-    client = genai.Client()
-
-    uploaded = client.files.upload(file=pdf_path, config={"mime_type": "application/pdf"})
-
-    response = client.models.generate_content(
-        model=EXTRACT_MODEL,
-        contents=[
-            types.Content(
-                parts=[
-                    types.Part.from_uri(file_uri=uploaded.uri, mime_type="application/pdf"),
-                    types.Part.from_text(text=_EXTRACT_PROMPT),
-                ],
-            ),
-        ],
-        config=types.GenerateContentConfig(
-            temperature=0.0,
-            max_output_tokens=65536,
-        ),
-    )
-
-    text = response.text or ""
-    if len(text) < 100:
-        raise ValueError(f"Gemini returned too little text ({len(text)} chars)")
-    return text
+    # 3. PyMuPDF raw text
+    return _extract_with_pymupdf(pdf_path)
 
 
 def _extract_with_pymupdf(pdf_path: Path) -> str:

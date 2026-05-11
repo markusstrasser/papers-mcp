@@ -60,17 +60,18 @@ def mcp(data_dir, selve_root, corpus_root):
 
 
 def _seed_paper(doi: str, text: str) -> str:
-    """Pre-populate the store with a tiny PDF + parsed/paper.md."""
+    """Pre-populate the store with a tiny PDF + parsed.<parser_id>/page.md."""
     import tempfile
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
         f.write(b"%PDF-1.4\n%fake pdf bytes for tests\n%%EOF\n")
         pdf_path = Path(f.name)
     meta = ingest_pdf(pdf_path, doi=doi, skip_parse=True)
     paper_id = meta["paper_id"]
-    # Write parsed/paper.md so extract_text returns deterministic text.
-    parsed = ps.paper_path(paper_id) / "parsed"
+    # Write parsed.test@1/page.md so extract_text resolves on the local path
+    # (Phase 1.5 immutable parsed dirs).
+    parsed = ps.paper_path(paper_id) / "parsed.test@1"
     parsed.mkdir(parents=True, exist_ok=True)
-    (parsed / "paper.md").write_text(text, encoding="utf-8")
+    (parsed / "page.md").write_text(text, encoding="utf-8")
     pdf_path.unlink(missing_ok=True)
     return paper_id
 
