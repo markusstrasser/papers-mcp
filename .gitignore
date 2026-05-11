@@ -45,3 +45,11 @@ data/pdfs/
 .env.*
 # The '!' is escaped to prevent issues if script is sourced in zsh
 \!.env.example
+
+# Session-local scratch + model-review artifacts
+.scratch/
+.model-review/*/*
+!.model-review/*/disposition.md
+!.model-review/*/findings.json
+!.model-review/*/coverage.json
+!.model-review/*/verified-disposition.md
