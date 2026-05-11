@@ -358,12 +358,9 @@ def create_mcp(
         db = ctx.lifespan_context["db"]
         s2 = ctx.lifespan_context["s2"]
 
-        # Phase 0 measurement state (decisions/2026-05-11-cross-attestation-substrate.md).
-        # Logged in finally below — must capture pre-state before any DB writes.
-        _raw_id = paper_id or (f"doi:{doi}" if doi else None) or url
-        _norm_id: str | None = None
-        _had_ft_before = False
-        _status = "error"
+        # Phase 0 fetch_log dropped in Phase 7 of substrate-migration plan —
+        # corpus.annotations table now covers fetch provenance (scope='raw_fetch'
+        # written by corpus_core.annotate at the success path below).
 
         try:
             # Resolve DOI
@@ -373,17 +370,13 @@ def create_mcp(
             if paper_id and not doi:
                 paper = db.get_paper(paper_id)
                 if paper is None:
-                    _status = "not_in_corpus"
                     return {"error": f"Paper {paper_id} not in corpus. Use save_paper first."}
-                _had_ft_before = bool(paper.get("full_text"))
-                _norm_id = f"doi:{paper.get('doi')}" if paper.get("doi") else f"paper:{paper_id}"
                 resolved_doi = paper.get("doi")
                 if not resolved_doi and not url:
                     oa_url = paper.get("open_access_url")
                     if oa_url:
                         url = oa_url
                     else:
-                        _status = "no_pdf"
                         return {"error": f"Paper {paper_id} has no DOI or OA URL."}
 
             if doi and not paper_id:
@@ -402,10 +395,8 @@ def create_mcp(
                 # primary key + doi field to the requested DOI regardless of
                 # what S2 says.
                 target_paper_id = doi.replace("/", "_")
-                _norm_id = f"doi:{doi}"
-                existing = db.get_paper(target_paper_id)
-                if existing:
-                    _had_ft_before = bool(existing.get("full_text"))
+                # (existed-check / log_fetch hook dropped in Phase 7;
+                #  corpus annotation handles provenance now.)
                 try:
                     s2_paper = s2.get_paper(f"DOI:{doi}")
                 except Exception:
@@ -425,10 +416,6 @@ def create_mcp(
                 # URL-only fetch: auto-create corpus entry so read_paper works
                 url_hash = hashlib.md5(url.encode()).hexdigest()[:16]
                 target_paper_id = f"url_{url_hash}"
-                _norm_id = f"url:{url_hash}"
-                existing = db.get_paper(target_paper_id)
-                if existing:
-                    _had_ft_before = bool(existing.get("full_text"))
                 # Extract a readable title from the URL filename
                 url_filename = url.rstrip("/").rsplit("/", 1)[-1]
                 title = url_filename if url_filename else f"URL: {url[:80]}"
@@ -445,7 +432,6 @@ def create_mcp(
                 store_paper_id = download_url(url)
 
             if not store_paper_id:
-                _status = "no_pdf"
                 return {"error": f"Could not download PDF for doi={resolved_doi} url={url}"}
 
             pdf_path = paper_store.paper_path(store_paper_id) / "paper.pdf"
@@ -474,7 +460,6 @@ def create_mcp(
             # Extract text — prefers parsed/paper.md, falls back to Gemini/PyMuPDF.
             full_text = extract_text(store_paper_id)
             if not full_text.strip():
-                _status = "no_pdf"
                 return {"error": f"PDF ingested but no text extractable: {store_paper_id}"}
 
             # Store in DB
@@ -512,10 +497,12 @@ def create_mcp(
             if quality_card:
                 result["quality_status"] = "assessed"
                 result["quality"] = quality_card
-            _status = "ok"
             return result
         finally:
-            db.log_fetch(_norm_id, _raw_id, _had_ft_before, _status)
+            # No log_fetch — fetch_log was dropped in Phase 7. The corpus
+            # annotation written above (scope='raw_fetch') is the canonical
+            # provenance record now.
+            pass
 
     @mcp.tool(annotations=_RO_LOCAL, tags={"corpus"})
     def read_paper(ctx: Context, paper_id: str) -> dict:

@@ -38,22 +38,8 @@ CREATE TABLE IF NOT EXISTS sources (
     fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Phase 0 measurement (decisions/2026-05-11-cross-attestation-substrate.md).
--- Validates the premise that paper fetches are being duplicated across repos
--- before any cross-attestation substrate is built. Append-only; analyze with
--- scripts/analyze_fetch_log.py after ~7 days.
-CREATE TABLE IF NOT EXISTS fetch_log (
-    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_id_norm TEXT,           -- canonical id (doi:..., paper_id, url-hash)
-    source_id_raw TEXT,            -- whatever the caller passed
-    caller_tag TEXT,               -- $RESEARCH_MCP_CALLER or 'unknown'
-    had_full_text_before INTEGER,  -- 1 if paper.full_text was already populated
-    result_status TEXT,            -- 'ok' | 'error' | 'no_pdf' | 'not_in_corpus'
-    requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_fetch_log_source ON fetch_log(source_id_norm);
-CREATE INDEX IF NOT EXISTS idx_fetch_log_time ON fetch_log(requested_at);
+-- (fetch_log table dropped in Phase 7 of substrate-migration plan —
+-- corpus.annotations table now covers fetch provenance via scope='raw_fetch'.)
 """
 
 MIGRATIONS = [
@@ -74,27 +60,6 @@ class PaperDB:
         self.conn.executescript(SCHEMA)
         self._migrate()
         self.caller_tag = os.environ.get("RESEARCH_MCP_CALLER", "unknown")
-
-    def log_fetch(
-        self,
-        source_id_norm: str | None,
-        source_id_raw: str | None,
-        had_full_text_before: bool,
-        result_status: str,
-    ) -> None:
-        """Append a row to fetch_log. Fail-silent — measurement must not break fetches."""
-        try:
-            self.conn.execute(
-                """INSERT INTO fetch_log
-                       (source_id_norm, source_id_raw, caller_tag,
-                        had_full_text_before, result_status)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (source_id_norm, source_id_raw, self.caller_tag,
-                 1 if had_full_text_before else 0, result_status),
-            )
-            self.conn.commit()
-        except Exception:
-            pass
 
     def _migrate(self):
         for sql in MIGRATIONS:
