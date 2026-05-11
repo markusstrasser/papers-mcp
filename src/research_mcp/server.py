@@ -18,6 +18,7 @@ from research_mcp.db import PaperDB
 from research_mcp.discovery import SemanticScholar
 from research_mcp.openalex import OpenAlex
 from research_mcp.papers import download_paper, download_url, extract_text
+from papers import paper_store
 from research_mcp.cag import ask_corpus, ask_corpus_rcs
 from research_mcp.rcs import prepare_evidence_async
 from research_mcp.extraction import extract_table_async, COLUMN_PRESETS
@@ -32,7 +33,7 @@ from research_mcp.cc_ranks import lookup_domain as _cc_lookup
 
 log = logging.getLogger(__name__)
 
-DEFAULT_DATA_DIR = Path(__file__).parent.parent.parent / "data"
+DEFAULT_DATA_DIR = Path.home() / "Projects" / "papers"
 DEFAULT_SELVE_ROOT = Path.home() / "Projects" / "selve"
 
 # -- Annotation presets --
@@ -47,11 +48,10 @@ def create_mcp(
 ) -> FastMCP:
     data_dir = data_dir or Path(os.environ.get("RESEARCH_MCP_DATA", DEFAULT_DATA_DIR))
     selve_root = selve_root or Path(os.environ.get("SELVE_ROOT", DEFAULT_SELVE_ROOT))
-    pdf_dir = data_dir / "pdfs"
 
     @asynccontextmanager
     async def lifespan(server):
-        pdf_dir.mkdir(parents=True, exist_ok=True)
+        data_dir.mkdir(parents=True, exist_ok=True)
         db = PaperDB(data_dir / "papers.db", check_same_thread=False)
         s2 = SemanticScholar(db, api_key=os.environ.get("S2_API_KEY"))
         oa = OpenAlex(
@@ -64,7 +64,7 @@ def create_mcp(
             log.info("Exa client initialized for claim verification")
         else:
             log.info("No EXA_API_KEY — verify_claim will return insufficient")
-        yield {"db": db, "s2": s2, "oa": oa, "exa": exa, "selve_root": selve_root, "pdf_dir": pdf_dir}
+        yield {"db": db, "s2": s2, "oa": oa, "exa": exa, "selve_root": selve_root}
 
     mcp = FastMCP(
         "research",
@@ -351,7 +351,6 @@ def create_mcp(
             url: Direct PDF URL to download.
         """
         db = ctx.lifespan_context["db"]
-        pdir = ctx.lifespan_context["pdf_dir"]
         s2 = ctx.lifespan_context["s2"]
 
         # Phase 0 measurement state (decisions/2026-05-11-cross-attestation-substrate.md).
@@ -431,22 +430,26 @@ def create_mcp(
                 db.upsert_paper({"paper_id": target_paper_id, "title": title, "open_access_url": url})
                 log.info("Auto-created corpus entry %s for URL %s", target_paper_id, url)
 
-            # Download PDF
-            pdf_path = None
+            # Download PDF → canonical store. download_paper/download_url
+            # ingest into ~/Projects/papers/ and return a store paper_id
+            # (distinct from target_paper_id, which is the corpus row key).
+            store_paper_id = None
             if resolved_doi:
-                pdf_path = download_paper(resolved_doi, pdir)
-            if not pdf_path and url:
-                pdf_path = download_url(url, pdir)
+                store_paper_id = download_paper(resolved_doi)
+            if not store_paper_id and url:
+                store_paper_id = download_url(url)
 
-            if not pdf_path:
+            if not store_paper_id:
                 _status = "no_pdf"
                 return {"error": f"Could not download PDF for doi={resolved_doi} url={url}"}
 
-            # Extract text
-            full_text = extract_text(pdf_path)
+            pdf_path = paper_store.paper_path(store_paper_id) / "paper.pdf"
+
+            # Extract text — prefers parsed/paper.md, falls back to Gemini/PyMuPDF.
+            full_text = extract_text(store_paper_id)
             if not full_text.strip():
                 _status = "no_pdf"
-                return {"error": f"PDF downloaded but no text extractable: {pdf_path.name}"}
+                return {"error": f"PDF ingested but no text extractable: {store_paper_id}"}
 
             # Store in DB
             if target_paper_id:
@@ -468,6 +471,7 @@ def create_mcp(
 
             result = {
                 "paper_id": target_paper_id,
+                "store_paper_id": store_paper_id,
                 "doi": resolved_doi,
                 "pdf": pdf_path.name,
                 "size_mb": round(pdf_path.stat().st_size / 1_048_576, 1),
