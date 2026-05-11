@@ -1,3 +1,8 @@
+"""fetch_paper end-to-end test against the canonical papers store.
+
+Tests the new (paper_id-returning) download_paper / download_url / extract_text
+signatures introduced in Phase 3 of plans/2026-05-11-shared-papers-store.md.
+"""
 import json
 from pathlib import Path
 
@@ -5,6 +10,9 @@ import httpx
 import pytest
 import respx
 from fastmcp import Client
+
+from papers import paper_store as ps
+from papers.ingest import ingest_pdf
 
 from research_mcp.discovery import S2_BASE
 from research_mcp.server import create_mcp
@@ -36,33 +44,63 @@ def selve_root(tmp_path):
 
 
 @pytest.fixture
-def mcp(data_dir, selve_root):
+def papers_root(tmp_path, monkeypatch):
+    """Redirect the canonical papers store to a per-test tmpdir."""
+    root = tmp_path / "papers"
+    root.mkdir()
+    monkeypatch.setenv("PAPERS_ROOT", str(root))
+    # AUTO_PARSE=0 keeps marker out of unit tests
+    monkeypatch.setenv("RESEARCH_MCP_AUTO_PARSE", "0")
+    return root
+
+
+@pytest.fixture
+def mcp(data_dir, selve_root, papers_root):
     return create_mcp(data_dir=data_dir, selve_root=selve_root)
+
+
+def _seed_paper(doi: str, text: str) -> str:
+    """Pre-populate the store with a tiny PDF + parsed/paper.md."""
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+        f.write(b"%PDF-1.4\n%fake pdf bytes for tests\n%%EOF\n")
+        pdf_path = Path(f.name)
+    meta = ingest_pdf(pdf_path, doi=doi, skip_parse=True)
+    paper_id = meta["paper_id"]
+    # Write parsed/paper.md so extract_text returns deterministic text.
+    parsed = ps.paper_path(paper_id) / "parsed"
+    parsed.mkdir(parents=True, exist_ok=True)
+    (parsed / "paper.md").write_text(text, encoding="utf-8")
+    pdf_path.unlink(missing_ok=True)
+    return paper_id
 
 
 @pytest.mark.anyio
 @respx.mock
-async def test_fetch_paper_returns_and_persists_quality(mcp, monkeypatch, tmp_path):
-    pdf_path = tmp_path / "test.pdf"
-    pdf_path.write_bytes(b"%PDF-1.4 fake pdf bytes")
+async def test_fetch_paper_returns_and_persists_quality(mcp, monkeypatch, papers_root):
+    doi = "10.1234/test"
+    extracted = (
+        "Association of 5-HTTLPR polymorphism with depression risk in 250 patients. "
+        "This open-label observational study found a significant association. "
+        "Data available on request."
+    )
+    expected_paper_id = _seed_paper(doi, extracted)
 
-    monkeypatch.setattr("research_mcp.server.download_paper", lambda doi, pdir: pdf_path)
+    # Stub download_paper to return the cached paper_id (cache-hit path).
+    # The real implementation also returns instantly when the store contains
+    # this paper_id, but stubbing keeps the test offline.
     monkeypatch.setattr(
-        "research_mcp.server.extract_text",
-        lambda path: (
-            "Association of 5-HTTLPR polymorphism with depression risk in 250 patients. "
-            "This open-label observational study found a significant association. "
-            "Data available on request."
-        ),
+        "research_mcp.server.download_paper",
+        lambda d: expected_paper_id,
     )
 
     respx.get(f"{S2_BASE}/paper/abc123").mock(
         return_value=httpx.Response(200, json=FAKE_PAPER)
     )
-    respx.get("https://api.crossref.org/works/10.1234/test").mock(
+    respx.get(f"https://api.crossref.org/works/{doi}").mock(
         return_value=httpx.Response(200, json={"message": {"title": ["Normal paper"], "update-to": [], "relation": {}}})
     )
-    respx.get("https://api.openalex.org/works/doi:10.1234/test").mock(
+    respx.get(f"https://api.openalex.org/works/doi:{doi}").mock(
         return_value=httpx.Response(200, json={"funders": [{"display_name": "NIH"}]})
     )
 
@@ -71,7 +109,9 @@ async def test_fetch_paper_returns_and_persists_quality(mcp, monkeypatch, tmp_pa
         fetch_result = await client.call_tool("fetch_paper", {"paper_id": "abc123"})
         fetch_data = json.loads(fetch_result.content[0].text)
 
-        assert fetch_data["doi"] == "10.1234/test"
+        assert fetch_data["doi"] == doi
+        assert fetch_data["store_paper_id"] == expected_paper_id
+        assert fetch_data["pdf"] == "paper.pdf"
         assert fetch_data["title"] == "Association of 5-HTTLPR polymorphism with depression risk"
         assert fetch_data["quality_status"] == "assessed"
         assert fetch_data["quality"]["is_candidate_gene"] is True
