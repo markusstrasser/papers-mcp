@@ -354,113 +354,138 @@ def create_mcp(
         pdir = ctx.lifespan_context["pdf_dir"]
         s2 = ctx.lifespan_context["s2"]
 
-        # Resolve DOI
-        resolved_doi = doi
-        target_paper_id = paper_id
+        # Phase 0 measurement state (decisions/2026-05-11-cross-attestation-substrate.md).
+        # Logged in finally below — must capture pre-state before any DB writes.
+        _raw_id = paper_id or (f"doi:{doi}" if doi else None) or url
+        _norm_id: str | None = None
+        _had_ft_before = False
+        _status = "error"
 
-        if paper_id and not doi:
-            paper = db.get_paper(paper_id)
-            if paper is None:
-                return {"error": f"Paper {paper_id} not in corpus. Use save_paper first."}
-            resolved_doi = paper.get("doi")
-            if not resolved_doi and not url:
-                oa_url = paper.get("open_access_url")
-                if oa_url:
-                    url = oa_url
+        try:
+            # Resolve DOI
+            resolved_doi = doi
+            target_paper_id = paper_id
+
+            if paper_id and not doi:
+                paper = db.get_paper(paper_id)
+                if paper is None:
+                    _status = "not_in_corpus"
+                    return {"error": f"Paper {paper_id} not in corpus. Use save_paper first."}
+                _had_ft_before = bool(paper.get("full_text"))
+                _norm_id = f"doi:{paper.get('doi')}" if paper.get("doi") else f"paper:{paper_id}"
+                resolved_doi = paper.get("doi")
+                if not resolved_doi and not url:
+                    oa_url = paper.get("open_access_url")
+                    if oa_url:
+                        url = oa_url
+                    else:
+                        _status = "no_pdf"
+                        return {"error": f"Paper {paper_id} has no DOI or OA URL."}
+
+            if doi and not paper_id:
+                # Always key the corpus row by the REQUESTED DOI so callers can
+                # find what they asked for. S2 enrichment is supplementary and
+                # must not override the primary key.
+                #
+                # Why: s2.search(doi, limit=1) is a fuzzy text search that
+                # routinely returns a similar-but-different paper than the
+                # requested DOI. Worse, the row's `doi` column then gets S2's
+                # canonical-DOI value (which may be a different paper entirely)
+                # while the PDF on disk IS the requested DOI's content. That
+                # mismatch broke 15+ papers in the 2026-05-10 drain prep —
+                # consumers couldn't find what they fetched. Use the DOI-typed
+                # `/paper/DOI:<X>` endpoint for exact lookup, and pin the
+                # primary key + doi field to the requested DOI regardless of
+                # what S2 says.
+                target_paper_id = doi.replace("/", "_")
+                _norm_id = f"doi:{doi}"
+                existing = db.get_paper(target_paper_id)
+                if existing:
+                    _had_ft_before = bool(existing.get("full_text"))
+                try:
+                    s2_paper = s2.get_paper(f"DOI:{doi}")
+                except Exception:
+                    s2_paper = None
+                if s2_paper:
+                    # Enrich with S2 metadata but override identity fields to
+                    # match the requested DOI. The PDF we'll fetch is keyed on
+                    # `doi` not `s2_paper["doi"]`, so consistency wins.
+                    s2_paper = dict(s2_paper)
+                    s2_paper["paper_id"] = target_paper_id
+                    s2_paper["doi"] = doi
+                    db.upsert_paper(s2_paper)
                 else:
-                    return {"error": f"Paper {paper_id} has no DOI or OA URL."}
+                    db.upsert_paper({"paper_id": target_paper_id, "doi": doi, "title": f"DOI: {doi}"})
 
-        if doi and not paper_id:
-            # Always key the corpus row by the REQUESTED DOI so callers can
-            # find what they asked for. S2 enrichment is supplementary and
-            # must not override the primary key.
-            #
-            # Why: s2.search(doi, limit=1) is a fuzzy text search that
-            # routinely returns a similar-but-different paper than the
-            # requested DOI. Worse, the row's `doi` column then gets S2's
-            # canonical-DOI value (which may be a different paper entirely)
-            # while the PDF on disk IS the requested DOI's content. That
-            # mismatch broke 15+ papers in the 2026-05-10 drain prep —
-            # consumers couldn't find what they fetched. Use the DOI-typed
-            # `/paper/DOI:<X>` endpoint for exact lookup, and pin the
-            # primary key + doi field to the requested DOI regardless of
-            # what S2 says.
-            target_paper_id = doi.replace("/", "_")
-            try:
-                s2_paper = s2.get_paper(f"DOI:{doi}")
-            except Exception:
-                s2_paper = None
-            if s2_paper:
-                # Enrich with S2 metadata but override identity fields to
-                # match the requested DOI. The PDF we'll fetch is keyed on
-                # `doi` not `s2_paper["doi"]`, so consistency wins.
-                s2_paper = dict(s2_paper)
-                s2_paper["paper_id"] = target_paper_id
-                s2_paper["doi"] = doi
-                db.upsert_paper(s2_paper)
-            else:
-                db.upsert_paper({"paper_id": target_paper_id, "doi": doi, "title": f"DOI: {doi}"})
+            if url and not target_paper_id:
+                # URL-only fetch: auto-create corpus entry so read_paper works
+                url_hash = hashlib.md5(url.encode()).hexdigest()[:16]
+                target_paper_id = f"url_{url_hash}"
+                _norm_id = f"url:{url_hash}"
+                existing = db.get_paper(target_paper_id)
+                if existing:
+                    _had_ft_before = bool(existing.get("full_text"))
+                # Extract a readable title from the URL filename
+                url_filename = url.rstrip("/").rsplit("/", 1)[-1]
+                title = url_filename if url_filename else f"URL: {url[:80]}"
+                db.upsert_paper({"paper_id": target_paper_id, "title": title, "open_access_url": url})
+                log.info("Auto-created corpus entry %s for URL %s", target_paper_id, url)
 
-        if url and not target_paper_id:
-            # URL-only fetch: auto-create corpus entry so read_paper works
-            url_hash = hashlib.md5(url.encode()).hexdigest()[:16]
-            target_paper_id = f"url_{url_hash}"
-            # Extract a readable title from the URL filename
-            url_filename = url.rstrip("/").rsplit("/", 1)[-1]
-            title = url_filename if url_filename else f"URL: {url[:80]}"
-            db.upsert_paper({"paper_id": target_paper_id, "title": title, "open_access_url": url})
-            log.info("Auto-created corpus entry %s for URL %s", target_paper_id, url)
+            # Download PDF
+            pdf_path = None
+            if resolved_doi:
+                pdf_path = download_paper(resolved_doi, pdir)
+            if not pdf_path and url:
+                pdf_path = download_url(url, pdir)
 
-        # Download PDF
-        pdf_path = None
-        if resolved_doi:
-            pdf_path = download_paper(resolved_doi, pdir)
-        if not pdf_path and url:
-            pdf_path = download_url(url, pdir)
+            if not pdf_path:
+                _status = "no_pdf"
+                return {"error": f"Could not download PDF for doi={resolved_doi} url={url}"}
 
-        if not pdf_path:
-            return {"error": f"Could not download PDF for doi={resolved_doi} url={url}"}
+            # Extract text
+            full_text = extract_text(pdf_path)
+            if not full_text.strip():
+                _status = "no_pdf"
+                return {"error": f"PDF downloaded but no text extractable: {pdf_path.name}"}
 
-        # Extract text
-        full_text = extract_text(pdf_path)
-        if not full_text.strip():
-            return {"error": f"PDF downloaded but no text extractable: {pdf_path.name}"}
+            # Store in DB
+            if target_paper_id:
+                db.update_paper_pdf(target_paper_id, str(pdf_path), full_text)
 
-        # Store in DB
-        if target_paper_id:
-            db.update_paper_pdf(target_paper_id, str(pdf_path), full_text)
+            chars = len(full_text)
+            est_tokens = chars // 4
 
-        chars = len(full_text)
-        est_tokens = chars // 4
+            # Auto-assess quality on fetch
+            quality_card = None
+            if target_paper_id:
+                try:
+                    from research_mcp.quality import assess_paper
+                    q = assess_paper(target_paper_id, db)
+                    quality_card = json.loads(q.to_json())
+                except Exception as e:
+                    log.warning("Quality assessment failed for %s: %s", target_paper_id, e)
+                    quality_card = {"error": str(e)}
 
-        # Auto-assess quality on fetch
-        quality_card = None
-        if target_paper_id:
-            try:
-                from research_mcp.quality import assess_paper
-                q = assess_paper(target_paper_id, db)
-                quality_card = json.loads(q.to_json())
-            except Exception as e:
-                log.warning("Quality assessment failed for %s: %s", target_paper_id, e)
-                quality_card = {"error": str(e)}
-
-        result = {
-            "paper_id": target_paper_id,
-            "doi": resolved_doi,
-            "pdf": pdf_path.name,
-            "size_mb": round(pdf_path.stat().st_size / 1_048_576, 1),
-            "text_chars": chars,
-            "est_tokens": est_tokens,
-            "preview": full_text[:500] + "..." if chars > 500 else full_text,
-        }
-        if target_paper_id:
-            paper_meta = db.get_paper(target_paper_id) or {}
-            if paper_meta.get("title"):
-                result["title"] = paper_meta["title"]
-        if quality_card:
-            result["quality_status"] = "assessed"
-            result["quality"] = quality_card
-        return result
+            result = {
+                "paper_id": target_paper_id,
+                "doi": resolved_doi,
+                "pdf": pdf_path.name,
+                "size_mb": round(pdf_path.stat().st_size / 1_048_576, 1),
+                "text_chars": chars,
+                "est_tokens": est_tokens,
+                "preview": full_text[:500] + "..." if chars > 500 else full_text,
+            }
+            if target_paper_id:
+                paper_meta = db.get_paper(target_paper_id) or {}
+                if paper_meta.get("title"):
+                    result["title"] = paper_meta["title"]
+            if quality_card:
+                result["quality_status"] = "assessed"
+                result["quality"] = quality_card
+            _status = "ok"
+            return result
+        finally:
+            db.log_fetch(_norm_id, _raw_id, _had_ft_before, _status)
 
     @mcp.tool(annotations=_RO_LOCAL, tags={"corpus"})
     def read_paper(ctx: Context, paper_id: str) -> dict:
