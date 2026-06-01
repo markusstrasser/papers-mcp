@@ -9,6 +9,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
+import httpx
 from fastmcp import FastMCP, Context
 from mcp.types import ToolAnnotations
 from research_mcp.middleware import TelemetryMiddleware
@@ -17,6 +18,8 @@ from tenacity import RetryError
 from research_mcp.db import PaperDB
 from research_mcp.discovery import SemanticScholar
 from research_mcp.openalex import OpenAlex
+from research_mcp.europepmc import EuropePMC
+from research_mcp.pubmed import PubMed
 from research_mcp.papers import download_paper, download_url, extract_text
 from corpus_core import store as paper_store
 from corpus_core.annotate import (
@@ -48,6 +51,25 @@ _RO_LOCAL = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHin
 _WRITE = ToolAnnotations(readOnlyHint=False, idempotentHint=True, openWorldHint=False)
 
 
+def _biomedical_epmc_id(db: PaperDB, seed_id: str) -> tuple[str, str] | None:
+    """Resolve a seed paper to a EuropePMC (source, ext_id) IF it's biomedical.
+
+    Returns ("MED", pmid) or ("PMC", pmcid) for papers with a PubMed/PMC
+    identifier, else None. EuropePMC only indexes biomedical literature, so a
+    citation fallback for an arXiv/CS/physics seed would return wrong or empty
+    results — callers must treat None as "no valid fallback for this paper".
+    """
+    paper = db.get_paper(seed_id)
+    if not paper:
+        return None
+    ext = paper.get("external_ids") or {}
+    if ext.get("PubMed"):
+        return ("MED", str(ext["PubMed"]))
+    if ext.get("PubMedCentral"):
+        return ("PMC", str(ext["PubMedCentral"]))
+    return None
+
+
 def create_mcp(
     data_dir: Path | None = None,
     selve_root: Path | None = None,
@@ -65,12 +87,20 @@ def create_mcp(
             api_key=os.environ.get("OPENALEX_API_KEY"),
             email=os.environ.get("OPENALEX_EMAIL"),
         )
+        epmc = EuropePMC()
+        pubmed = PubMed(
+            api_key=os.environ.get("NCBI_API_KEY"),
+            email=os.environ.get("NCBI_EMAIL"),
+        )
         exa = get_exa_client()
         if exa:
             log.info("Exa client initialized for claim verification")
         else:
             log.info("No EXA_API_KEY — verify_claim will return insufficient")
-        yield {"db": db, "s2": s2, "oa": oa, "exa": exa, "selve_root": selve_root}
+        yield {
+            "db": db, "s2": s2, "oa": oa, "epmc": epmc, "pubmed": pubmed,
+            "exa": exa, "selve_root": selve_root,
+        }
 
     mcp = FastMCP(
         "research",
@@ -83,7 +113,8 @@ def create_mcp(
             "3. fetch_paper — download PDF and extract full text (Sci-Hub + OA)\n"
             "4. prepare_evidence — score paper chunks for relevance (RCS). Use before ask_papers for better synthesis.\n"
             "5. ask_papers — ask questions against full-text papers (Gemini 1M context). Set use_rcs=True for scored evidence.\n"
-            "6. traverse_citations — discover related papers via S2 citation graph (one hop)\n"
+            "6. traverse_citations — discover related papers via S2 citation graph (one hop). Falls back to EuropePMC for biomedical seeds when S2 is rate-limited.\n"
+            "6b. pubmed_links — PMID → linked NCBI records (gene/compound/nucleotide/protein) via ELink. Batched.\n"
             "7. extract_table — Elicit-style structured extraction across papers\n"
             "8. list_corpus / get_paper — browse saved papers\n"
             "9. export_for_selve — export for ./selve update to embed into unified index\n\n"
@@ -103,7 +134,7 @@ def create_mcp(
             "- get_deep_research_status — check/retrieve results of a prior deep_research call\n\n"
             "--- Operational gotchas ---\n"
             "- S2 effective rate limit is ~1 req/5sec. Surveillance scripts need 4-5s delays.\n"
-            "- S2 hits 403 intermittently. Switch to backend:\"openalex\" for the rest of the session.\n"
+            "- S2 hits 403 intermittently. Switch to backend:\"openalex\" (general) or backend:\"europepmc\" (biomedical, returns full abstracts) for the rest of the session.\n"
             "- S2 misses landmark papers by keyword. Use backend:\"openalex\" for known-item retrieval.\n"
             "- S2 returns empty for AI/ML topics. Exa is more reliable for recent AI papers.\n"
             "- S2 has no date/recency filtering. Use search_preprints for date-bounded searches.\n"
@@ -122,7 +153,7 @@ def create_mcp(
         query: str,
         limit: int = 10,
         backend: str | None = None,
-    ) -> list[dict]:
+    ) -> list[dict] | dict:
         """Search for papers. Returns titles, abstracts, citation counts.
 
         Tries Semantic Scholar first, falls back to OpenAlex if S2 is rate-limited.
@@ -131,7 +162,10 @@ def create_mcp(
         Args:
             query: Search query.
             limit: Max results (capped at 50).
-            backend: Force a backend: "s2" or "openalex". If None, tries S2 then falls back.
+            backend: Force a backend: "s2", "openalex", or "europepmc". If None,
+                tries S2 then falls back to OpenAlex. Use "europepmc" for
+                biomedical literature (returns full abstracts) or as a non-S2
+                path when S2 and OpenAlex are rate-limited.
         """
         s2 = ctx.lifespan_context["s2"]
         oa = ctx.lifespan_context["oa"]
@@ -139,7 +173,14 @@ def create_mcp(
         results = None
         used_backend = None
 
-        if backend == "openalex":
+        if backend == "europepmc":
+            try:
+                results = ctx.lifespan_context["epmc"].search(query, limit=capped)
+                used_backend = "europepmc"
+            except (RuntimeError, httpx.HTTPError) as e:
+                log.warning("EuropePMC search failed: %s", e)
+                return {"error": f"EuropePMC unavailable. ({e})"}
+        elif backend == "openalex":
             try:
                 results = oa.search(query, limit=capped)
                 used_backend = "openalex"
@@ -234,22 +275,49 @@ def create_mcp(
         """
         s2 = ctx.lifespan_context["s2"]
         db = ctx.lifespan_context["db"]
+        epmc = ctx.lifespan_context["epmc"]
 
         all_papers = {}
         paper_seeds: dict[str, set] = {}
+        warnings: list[str] = []
 
         for seed_id in paper_ids:
             refs = []
+            s2_failed = False
             if direction in ("references", "both"):
                 try:
                     refs.extend(s2.get_references(seed_id) or [])
                 except RetryError as e:
+                    s2_failed = True
                     log.warning("get_references failed for %s: %s", seed_id, e)
             if direction in ("citations", "both"):
                 try:
                     refs.extend(s2.get_citations(seed_id) or [])
                 except RetryError as e:
+                    s2_failed = True
                     log.warning("get_citations failed for %s: %s", seed_id, e)
+
+            # S2-403 fallback — EuropePMC, but ONLY for biomedical seeds.
+            # A blind fallback for an arXiv/CS paper would return wrong results,
+            # so non-biomedical seeds surface an explicit warning instead.
+            if s2_failed:
+                bio = _biomedical_epmc_id(db, seed_id)
+                if bio is None:
+                    warnings.append(
+                        f"S2 unavailable for {seed_id} and no biomedical "
+                        f"(PMID/PMCID) identifier for EuropePMC fallback — "
+                        f"its citations are missing from these results."
+                    )
+                else:
+                    source, ext_id = bio
+                    try:
+                        if direction in ("references", "both"):
+                            refs.extend(epmc.references(source, ext_id, limit=100))
+                        if direction in ("citations", "both"):
+                            refs.extend(epmc.citations(source, ext_id, limit=100))
+                        log.info("EuropePMC citation fallback used for %s", seed_id)
+                    except (RuntimeError, httpx.HTTPError) as e:
+                        warnings.append(f"EuropePMC fallback failed for {seed_id}: {e}")
 
             for paper in refs:
                 pid = paper["paper_id"]
@@ -294,7 +362,38 @@ def create_mcp(
                 }
                 for pid, paper in filtered
             ],
+            **({"warnings": warnings} if warnings else {}),
         }
+
+    @mcp.tool(annotations=_RO, tags={"discovery"})
+    def pubmed_links(
+        ctx: Context,
+        pmids: list[str],
+        target_db: str = "gene",
+    ) -> dict:
+        """Map PubMed IDs to linked records in another NCBI database (ELink).
+
+        The one capability Semantic Scholar / OpenAlex / EuropePMC can't match:
+        PubMed's curated cross-database links. Given PMIDs (e.g. from
+        search_papers with backend="europepmc", whose results carry PubMed IDs
+        in external_ids), returns the associated genes / compounds / sequences.
+
+        Batched — pass many PMIDs in one call; one HTTP request resolves them
+        all, so there's no need to loop per-paper.
+
+        Args:
+            pmids: PubMed IDs to link from.
+            target_db: Entrez DB to link into — one of "gene", "pccompound",
+                "nuccore", "protein", "pmc", or "pubmed" (related articles).
+        """
+        pubmed = ctx.lifespan_context["pubmed"]
+        try:
+            return pubmed.elink(pmids, target_db=target_db)
+        except ValueError as e:
+            return {"error": str(e)}
+        except (RuntimeError, httpx.HTTPError) as e:
+            log.warning("pubmed_links failed: %s", e)
+            return {"error": f"NCBI ELink unavailable. ({e})"}
 
     # ── Corpus management ────────────────────────────────────────
 

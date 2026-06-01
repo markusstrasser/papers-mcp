@@ -310,11 +310,13 @@ requires-dist = [
     { name = "google-genai", marker = "extra == 'llm-fallback'", specifier = ">=1.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jsonschema", specifier = ">=4.20" },
+    { name = "liteparse", marker = "extra == 'liteparse'", specifier = ">=2.0" },
+    { name = "modal", marker = "extra == 'modal'", specifier = ">=1.0,<2.0" },
     { name = "pymupdf4llm", specifier = ">=0.0.20" },
     { name = "pypdf", specifier = ">=4.0" },
     { name = "trafilatura", specifier = ">=2.0" },
 ]
-provides-extras = ["llm-fallback"]
+provides-extras = ["llm-fallback", "liteparse", "modal"]
 
 [package.metadata.requires-dev]
 dev = [

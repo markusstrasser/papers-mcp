@@ -3,7 +3,6 @@ import pytest
 import respx
 import httpx
 from fastmcp import Client
-from fastmcp.exceptions import ToolError
 from research_mcp.server import create_mcp
 from research_mcp.discovery import S2_BASE
 from research_mcp.openalex import OA_BASE
@@ -161,7 +160,7 @@ async def test_search_explicit_openalex_backend(mcp):
 @pytest.mark.anyio
 @respx.mock
 async def test_search_explicit_s2_no_fallback(mcp):
-    """Explicit backend='s2' does not fall back to OpenAlex."""
+    """Explicit backend='s2' surfaces an error dict and does not fall back."""
     respx.get(f"{S2_BASE}/paper/search").mock(
         return_value=httpx.Response(429, headers={"Retry-After": "0"})
     )
@@ -169,10 +168,11 @@ async def test_search_explicit_s2_no_fallback(mcp):
         return_value=httpx.Response(200, json=FAKE_OA_SEARCH)
     )
     async with Client(mcp) as client:
-        with pytest.raises(ToolError, match="rate-limited"):
-            await client.call_tool(
-                "search_papers", {"query": "test", "backend": "s2"}
-            )
+        result = await client.call_tool(
+            "search_papers", {"query": "test", "backend": "s2"}
+        )
+        data = json.loads(result.content[0].text)
+        assert "rate-limited" in data["error"]
     assert oa_route.call_count == 0
 
 
@@ -213,3 +213,46 @@ async def test_list_sources(mcp):
         result = await client.call_tool("list_sources", {})
         data = json.loads(result.content[0].text)
         assert len(data) == 2
+
+
+# ── EuropePMC citation-fallback gating (_biomedical_epmc_id) ──────────
+# The fallback decision is pure and lives in this helper. The review's
+# concern — biomedical seeds resolve via EuropePMC, non-biomedical (arXiv/
+# CS) seeds must NOT — is fully captured here without driving the slow
+# S2-retry → fallback integration path.
+
+from research_mcp.server import _biomedical_epmc_id
+from research_mcp.db import PaperDB
+
+
+def test_biomedical_gate_resolves_pmid(tmp_path):
+    db = PaperDB(tmp_path / "g1.db")
+    db.upsert_paper({
+        "paper_id": "s2bio", "title": "Bio paper",
+        "external_ids": {"PubMed": "20301428", "DOI": "10.1/x"},
+    })
+    assert _biomedical_epmc_id(db, "s2bio") == ("MED", "20301428")
+
+
+def test_biomedical_gate_resolves_pmcid(tmp_path):
+    db = PaperDB(tmp_path / "g2.db")
+    db.upsert_paper({
+        "paper_id": "s2pmc", "title": "PMC paper",
+        "external_ids": {"PubMedCentral": "PMC1234567"},
+    })
+    assert _biomedical_epmc_id(db, "s2pmc") == ("PMC", "PMC1234567")
+
+
+def test_biomedical_gate_rejects_arxiv(tmp_path):
+    db = PaperDB(tmp_path / "g3.db")
+    db.upsert_paper({
+        "paper_id": "s2arxiv", "title": "CS paper",
+        "external_ids": {"ArXiv": "2401.00001", "DOI": "10.48550/arXiv.2401.00001"},
+    })
+    # No PubMed/PMC id → no valid biomedical fallback.
+    assert _biomedical_epmc_id(db, "s2arxiv") is None
+
+
+def test_biomedical_gate_missing_seed(tmp_path):
+    db = PaperDB(tmp_path / "g4.db")
+    assert _biomedical_epmc_id(db, "never_seen") is None
