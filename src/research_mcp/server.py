@@ -169,7 +169,8 @@ def create_mcp(
     ) -> list[dict] | dict:
         """Search for papers. Returns titles, abstracts, citation counts.
 
-        Tries Semantic Scholar first, falls back to OpenAlex if S2 is rate-limited.
+        Tries Semantic Scholar first, falls back to OpenAlex if S2 is rate-limited,
+        403-blocked, or unavailable.
         Use this to discover papers on a topic. Save interesting ones with save_paper.
 
         Args:
@@ -202,24 +203,27 @@ def create_mcp(
                 log.warning("OpenAlex search failed: %s", cause)
                 return {"error": f"OpenAlex unavailable. ({cause})"}
         else:
-            # Try S2 first
+            # Try S2 first. Catch both RetryError (429/5xx exhausted retries) AND
+            # raw httpx.HTTPError — notably 403, which is NOT retryable so it
+            # propagates un-wrapped and would otherwise bypass the fallback. S2
+            # 403s are the single largest error class in the MCP logs (383).
             try:
                 results = s2.search(query, limit=capped)
                 used_backend = "s2"
-            except RetryError as e:
+            except (RetryError, httpx.HTTPError) as e:
+                cause = e.last_attempt.exception() if isinstance(e, RetryError) and e.last_attempt else e
                 if backend == "s2":
-                    cause = e.last_attempt.exception() if e.last_attempt else e
                     log.warning("S2 search failed (no fallback): %s", cause)
-                    return {"error": f"Semantic Scholar rate-limited or unavailable. ({cause})"}
-                # Fall back to OpenAlex
-                log.info("S2 search failed, falling back to OpenAlex")
+                    return {"error": f"Semantic Scholar rate-limited, 403-blocked, or unavailable. ({cause})"}
+                # Fall back to OpenAlex (covers 403, 429, and 5xx)
+                log.info("S2 search failed (%s), falling back to OpenAlex", cause)
                 try:
                     results = oa.search(query, limit=capped)
                     used_backend = "openalex"
-                except RetryError as e2:
-                    cause = e2.last_attempt.exception() if e2.last_attempt else e2
-                    log.warning("Both S2 and OpenAlex failed: %s", cause)
-                    return {"error": f"Both Semantic Scholar and OpenAlex unavailable. ({cause})"}
+                except (RetryError, httpx.HTTPError) as e2:
+                    cause2 = e2.last_attempt.exception() if isinstance(e2, RetryError) and e2.last_attempt else e2
+                    log.warning("Both S2 and OpenAlex failed: %s", cause2)
+                    return {"error": f"Both Semantic Scholar and OpenAlex unavailable. ({cause2})"}
 
         for r in results:
             if r.get("abstract") and len(r["abstract"]) > 300:

@@ -140,6 +140,26 @@ async def test_search_falls_back_to_openalex_on_s2_429(mcp):
 
 @pytest.mark.anyio
 @respx.mock
+async def test_search_falls_back_to_openalex_on_s2_403(mcp):
+    """S2 403 is NOT retryable, so it propagates un-wrapped (httpx.HTTPStatusError,
+    not RetryError). Regression: it must still trigger the OpenAlex fallback rather
+    than failing the call. 403 was the largest error class in the MCP logs."""
+    respx.get(f"{S2_BASE}/paper/search").mock(
+        return_value=httpx.Response(403)
+    )
+    respx.get(f"{OA_BASE}/works").mock(
+        return_value=httpx.Response(200, json=FAKE_OA_SEARCH)
+    )
+    async with Client(mcp) as client:
+        result = await client.call_tool("search_papers", {"query": "test"})
+        data = json.loads(result.content[0].text)
+        assert len(data) == 1
+        assert data[0]["title"] == "OpenAlex Paper"
+        assert data[0]["paper_id"] == "W999"
+
+
+@pytest.mark.anyio
+@respx.mock
 async def test_search_explicit_openalex_backend(mcp):
     """Explicit backend='openalex' skips S2 entirely."""
     s2_route = respx.get(f"{S2_BASE}/paper/search").mock(
