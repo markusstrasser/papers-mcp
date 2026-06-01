@@ -100,10 +100,13 @@ class PubMed:
             seed = str(seed_ids[0]) if seed_ids else None
             if seed is None:
                 continue
-            linked: list[str] = []
+            # NCBI may return several linksetdbs (e.g. pubmed_gene +
+            # pubmed_gene_rif) — flatten and dedupe, preserving first-seen order.
+            seen: dict[str, None] = {}
             for linksetdb in linkset.get("linksetdbs", []):
-                linked.extend(str(x) for x in linksetdb.get("links", []))
-            links[seed] = linked
+                for x in linksetdb.get("links", []):
+                    seen.setdefault(str(x), None)
+            links[seed] = list(seen)
         return links
 
     def close(self) -> None:

@@ -78,7 +78,9 @@ class EuropePMC:
                 "query": query,
                 "format": "json",
                 "resultType": "core",
-                "pageSize": min(limit, 100),
+                # EuropePMC allows pageSize up to 1000 — one page covers any
+                # realistic `limit` without silently truncating.
+                "pageSize": min(limit, 1000),
             },
         )
         results = data.get("resultList", {}).get("result", [])
@@ -148,11 +150,13 @@ class EuropePMC:
     def _normalize_citation(raw: dict) -> dict:
         """Citation/reference list entries are lighter than core records."""
         pmid = raw.get("id") if raw.get("source") == "MED" else None
+        year_str = str(raw.get("pubYear") or "")
+        year = int(year_str) if year_str.isdigit() else None
         return {
             "paper_id": f"EPMC:{raw.get('source', '')}:{raw.get('id', '')}",
             "doi": raw.get("doi"),
             "title": raw.get("title", ""),
-            "year": raw.get("pubYear"),
+            "year": year,
             "citation_count": raw.get("citedByCount") or 0,
             "external_ids": {"PubMed": pmid} if pmid else {},
         }

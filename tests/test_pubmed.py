@@ -39,6 +39,22 @@ def test_elink_maps_pmid_to_genes():
     assert route.call_count == 1
 
 
+@respx.mock
+def test_elink_dedupes_across_linksetdbs():
+    # NCBI can return multiple linksetdbs (pubmed_gene + pubmed_gene_rif);
+    # the same gene id must not appear twice, order preserved.
+    payload = {"linksets": [{"ids": ["1"], "linksetdbs": [
+        {"linkname": "pubmed_gene", "links": ["7040", "1080", "2212"]},
+        {"linkname": "pubmed_gene_rif", "links": ["1080", "9999"]},
+    ]}]}
+    with respx.mock:
+        respx.get(f"{EUTILS_BASE}/elink.fcgi").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        out = _pubmed().elink(["1"], target_db="gene")
+        assert out["links"]["1"] == ["7040", "1080", "2212", "9999"]
+
+
 def test_elink_rejects_unknown_db():
     try:
         _pubmed().elink(["123"], target_db="not_a_db")

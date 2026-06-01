@@ -59,6 +59,15 @@ def _biomedical_epmc_id(db: PaperDB, seed_id: str) -> tuple[str, str] | None:
     citation fallback for an arXiv/CS/physics seed would return wrong or empty
     results — callers must treat None as "no valid fallback for this paper".
     """
+    # The seed_id may itself carry a biomedical identifier (not yet in the DB).
+    sid = seed_id.strip()
+    up = sid.upper()
+    if up.startswith("PMID:"):
+        return ("MED", sid.split(":", 1)[1].strip())
+    if up.startswith("PMCID:"):
+        return ("PMC", sid.split(":", 1)[1].strip())
+    if up.startswith("PMC") and sid[3:].isdigit():
+        return ("PMC", sid)
     paper = db.get_paper(seed_id)
     if not paper:
         return None
@@ -97,10 +106,14 @@ def create_mcp(
             log.info("Exa client initialized for claim verification")
         else:
             log.info("No EXA_API_KEY — verify_claim will return insufficient")
-        yield {
-            "db": db, "s2": s2, "oa": oa, "epmc": epmc, "pubmed": pubmed,
-            "exa": exa, "selve_root": selve_root,
-        }
+        try:
+            yield {
+                "db": db, "s2": s2, "oa": oa, "epmc": epmc, "pubmed": pubmed,
+                "exa": exa, "selve_root": selve_root,
+            }
+        finally:
+            epmc.close()
+            pubmed.close()
 
     mcp = FastMCP(
         "research",
@@ -283,39 +296,41 @@ def create_mcp(
 
         for seed_id in paper_ids:
             refs = []
-            s2_failed = False
+            failed_dirs: list[str] = []
             if direction in ("references", "both"):
                 try:
                     refs.extend(s2.get_references(seed_id) or [])
                 except RetryError as e:
-                    s2_failed = True
+                    failed_dirs.append("references")
                     log.warning("get_references failed for %s: %s", seed_id, e)
             if direction in ("citations", "both"):
                 try:
                     refs.extend(s2.get_citations(seed_id) or [])
                 except RetryError as e:
-                    s2_failed = True
+                    failed_dirs.append("citations")
                     log.warning("get_citations failed for %s: %s", seed_id, e)
 
-            # S2-403 fallback — EuropePMC, but ONLY for biomedical seeds.
-            # A blind fallback for an arXiv/CS paper would return wrong results,
-            # so non-biomedical seeds surface an explicit warning instead.
-            if s2_failed:
+            # S2-403 fallback — EuropePMC, but ONLY for biomedical seeds AND
+            # ONLY for the direction(s) that actually failed (so a succeeded
+            # S2 direction isn't re-fetched from EuropePMC, which would
+            # duplicate papers under a different ID namespace).
+            if failed_dirs:
                 bio = _biomedical_epmc_id(db, seed_id)
                 if bio is None:
                     warnings.append(
                         f"S2 unavailable for {seed_id} and no biomedical "
                         f"(PMID/PMCID) identifier for EuropePMC fallback — "
-                        f"its citations are missing from these results."
+                        f"its {'/'.join(failed_dirs)} are missing from these results."
                     )
                 else:
                     source, ext_id = bio
                     try:
-                        if direction in ("references", "both"):
+                        if "references" in failed_dirs:
                             refs.extend(epmc.references(source, ext_id, limit=100))
-                        if direction in ("citations", "both"):
+                        if "citations" in failed_dirs:
                             refs.extend(epmc.citations(source, ext_id, limit=100))
-                        log.info("EuropePMC citation fallback used for %s", seed_id)
+                        log.info("EuropePMC citation fallback used for %s (%s)",
+                                 seed_id, "/".join(failed_dirs))
                     except (RuntimeError, httpx.HTTPError) as e:
                         warnings.append(f"EuropePMC fallback failed for {seed_id}: {e}")
 

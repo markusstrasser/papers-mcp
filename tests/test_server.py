@@ -256,3 +256,11 @@ def test_biomedical_gate_rejects_arxiv(tmp_path):
 def test_biomedical_gate_missing_seed(tmp_path):
     db = PaperDB(tmp_path / "g4.db")
     assert _biomedical_epmc_id(db, "never_seen") is None
+
+
+def test_biomedical_gate_parses_pmid_prefix(tmp_path):
+    # seed_id is itself a PMID, not yet in the DB → resolve directly.
+    db = PaperDB(tmp_path / "g5.db")
+    assert _biomedical_epmc_id(db, "PMID:20301428") == ("MED", "20301428")
+    assert _biomedical_epmc_id(db, "PMCID:1234567") == ("PMC", "1234567")
+    assert _biomedical_epmc_id(db, "PMC7654321") == ("PMC", "PMC7654321")
