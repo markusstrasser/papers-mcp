@@ -24,6 +24,7 @@ from corpus_core.annotate import (
     AnnotationTooLargeError,
     annotate as corpus_annotate,
 )
+from corpus_core.index import epistemic_surface
 from research_mcp.cag import ask_corpus, ask_corpus_rcs
 from research_mcp.rcs import prepare_evidence_async
 from research_mcp.extraction import extract_table_async, COLUMN_PRESETS
@@ -490,6 +491,7 @@ def create_mcp(
                 "est_tokens": est_tokens,
                 "preview": full_text[:500] + "..." if chars > 500 else full_text,
             }
+            paper_meta = {}
             if target_paper_id:
                 paper_meta = db.get_paper(target_paper_id) or {}
                 if paper_meta.get("title"):
@@ -497,6 +499,24 @@ def create_mcp(
             if quality_card:
                 result["quality_status"] = "assessed"
                 result["quality"] = quality_card
+
+            # Deterministic epistemic read-loop on the fetch path — mirrors what
+            # corpus_lookup carries (active verdict attestations + active claim
+            # relations + linear support_balance + conflict). An agent fetching a
+            # paper (about to read/act on it) is SHOWN whether the source is under
+            # an active refutation, in-band, without separately calling
+            # corpus_lookup. Best-effort: any failure (no graph.duckdb, duckdb
+            # missing, surface raises) leaves the normal fetch result untouched.
+            try:
+                result["epistemic_status"] = epistemic_surface(
+                    store_paper_id,
+                    retraction_status=paper_meta.get("retraction_status", "unknown"),
+                    db_path=paper_store.graph_db_path(),
+                )
+            except Exception as exc:  # noqa: BLE001 — enrichment must never break fetch
+                log.warning(
+                    "epistemic enrichment failed for %s: %s", store_paper_id, exc
+                )
             return result
         finally:
             # No log_fetch — fetch_log was dropped in Phase 7. The corpus
