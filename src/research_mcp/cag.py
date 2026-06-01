@@ -4,13 +4,37 @@ import logging
 import os
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 logger = logging.getLogger(__name__)
 
-# Tiered models: cheap for broad sweeps, capable for focused analysis
+
+def _is_retryable_genai(exc: BaseException) -> bool:
+    """Retry transient Gemini failures: 5xx (model overloaded / 503) and 429
+    (rate limit). Mirrors discovery.py's S2 retry — the single synthesis call
+    otherwise hard-fails ask_papers on a transient overload."""
+    if isinstance(exc, genai_errors.ServerError):
+        return True
+    return isinstance(exc, genai_errors.ClientError) and getattr(exc, "code", None) == 429
+
+
+@retry(
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(min=2, max=30),
+    retry=retry_if_exception(_is_retryable_genai),
+)
+def _generate_with_retry(client: genai.Client, model: str, contents: str, config):
+    return client.models.generate_content(model=model, contents=contents, config=config)
+
+# Tiered models: cheap classification tier for broad many-paper sweeps,
+# capable synthesis tier for focused analysis + the RCS answer path.
+# (Both previously defaulted to gemini-3-flash-preview, silently collapsing the
+# tiering — the "focused" answer used the cheap classification model. 3.5-flash
+# is the synthesis default per operator routing; 2026-06-01.)
 MODEL_BROAD = os.environ.get("CAG_MODEL_BROAD", "gemini-3-flash-preview")
-MODEL_FOCUSED = os.environ.get("CAG_MODEL_FOCUSED", "gemini-3-flash-preview")
+MODEL_FOCUSED = os.environ.get("CAG_MODEL_FOCUSED", "gemini-3.5-flash")
 
 # ~4 chars per token on average for English text
 CHARS_PER_TOKEN = 4
@@ -78,10 +102,11 @@ def ask_corpus(
     logger.info(f"CAG: {included} papers, ~{est_tokens:,} tokens, model={model}")
 
     client = genai.Client()
-    response = client.models.generate_content(
-        model=model,
-        contents=f"Papers:\n\n{corpus}\n\nQuestion: {question}",
-        config=types.GenerateContentConfig(
+    response = _generate_with_retry(
+        client,
+        model,
+        f"Papers:\n\n{corpus}\n\nQuestion: {question}",
+        types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             temperature=0.2,
             max_output_tokens=8192,
@@ -143,10 +168,11 @@ def ask_corpus_rcs(
     logger.info(f"CAG-RCS: {included} evidence chunks, ~{est_tokens:,} tokens, model={model}")
 
     client = genai.Client()
-    response = client.models.generate_content(
-        model=model,
-        contents=f"Evidence (sorted by relevance):\n\n{corpus}\n\nQuestion: {question}",
-        config=types.GenerateContentConfig(
+    response = _generate_with_retry(
+        client,
+        model,
+        f"Evidence (sorted by relevance):\n\n{corpus}\n\nQuestion: {question}",
+        types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             temperature=0.2,
             max_output_tokens=8192,
