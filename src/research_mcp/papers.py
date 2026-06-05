@@ -11,6 +11,7 @@ Extraction pipeline (in order):
   3. PyMuPDF raw text (last-resort offline fallback)
 """
 
+import functools
 import logging
 import os
 import re
@@ -22,8 +23,21 @@ from typing import Optional
 
 from corpus_core import store as ps
 from corpus_core.ingest import ingest_pdf
+from corpus_core.store import CorpusStore
 
 logger = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=1)
+def corpus_store() -> CorpusStore:
+    """Process-boundary corpus handle.
+
+    corpus_core uses explicit store injection (no module-level default root);
+    research-mcp resolves the root once here, at its boundary. Root = CORPUS_ROOT
+    env var, else the canonical ~/Projects/corpus.
+    """
+    root = os.environ.get("CORPUS_ROOT")
+    return CorpusStore(Path(root).expanduser() if root else Path("~/Projects/corpus").expanduser())
 
 SCIHUB_MIRRORS = [
     "https://sci-hub.ru",
@@ -48,7 +62,7 @@ def download_paper(doi: str) -> Optional[str]:
     paper_id = ps.derive_paper_id(doi=doi)
 
     # Cache check — if already in the store, return without downloading.
-    if ps.exists(paper_id):
+    if corpus_store().exists(paper_id):
         return paper_id
 
     with tempfile.TemporaryDirectory(prefix="research-mcp-dl-") as td:
@@ -109,7 +123,7 @@ def download_url(url: str, name: Optional[str] = None) -> Optional[str]:
     if derived:
         try:
             cached_id = ps.derive_paper_id(**derived)
-            if ps.exists(cached_id):
+            if corpus_store().exists(cached_id):
                 return cached_id
         except ps.PaperStoreError:
             pass
@@ -135,8 +149,12 @@ def download_url(url: str, name: Optional[str] = None) -> Optional[str]:
 
 def _ingest(pdf_path: Path, **id_fields) -> Optional[str]:
     """Hand a freshly-downloaded PDF to the canonical store. Returns paper_id."""
+    # ingest_pdf computes pdf_sha256 itself and derives the id from it when no
+    # doi/pmid is supplied, so a stale pdf_sha kwarg is both unaccepted and
+    # redundant — drop it.
+    id_fields.pop("pdf_sha", None)
     try:
-        meta = ingest_pdf(pdf_path, skip_parse=not _auto_parse_enabled(), **id_fields)
+        meta = ingest_pdf(corpus_store(), pdf_path, skip_parse=not _auto_parse_enabled(), **id_fields)
         return meta["paper_id"]
     except Exception as e:
         logger.warning("ingest_pdf failed for %s: %s", pdf_path.name, e)
@@ -152,7 +170,7 @@ def extract_text(paper_id: str) -> str:
       2. corpus_core.extract.pdf_llm fallback (Gemini Flash-Lite).
       3. PyMuPDF raw text — last-resort offline.
     """
-    rec = ps.get(paper_id)  # raises PaperNotFoundError on miss
+    rec = corpus_store().get(paper_id)  # raises PaperNotFoundError on miss
 
     # 1. Any local parsed.<parser_id>/page.md
     for child in sorted(rec.path.iterdir()):

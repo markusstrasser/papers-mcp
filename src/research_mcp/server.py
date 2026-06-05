@@ -20,7 +20,7 @@ from research_mcp.discovery import SemanticScholar
 from research_mcp.openalex import OpenAlex
 from research_mcp.europepmc import EuropePMC
 from research_mcp.pubmed import PubMed
-from research_mcp.papers import download_paper, download_url, extract_text
+from research_mcp.papers import corpus_store, download_paper, download_url, extract_text
 from corpus_core import store as paper_store
 from corpus_core.annotate import (
     AnnotationError,
@@ -553,7 +553,7 @@ def create_mcp(
             if not store_paper_id:
                 return {"error": f"Could not download PDF for doi={resolved_doi} url={url}"}
 
-            pdf_path = paper_store.paper_path(store_paper_id) / "paper.pdf"
+            pdf_path = corpus_store().paper_path(store_paper_id) / "paper.pdf"
 
             # Phase 1 (substrate-migration plan): every fetch leaves a corpus
             # annotation. corpus_core.annotate is the SOLE writer of
@@ -564,6 +564,7 @@ def create_mcp(
                 )
                 corpus_annotate(
                     store_paper_id,
+                    store=corpus_store(),
                     repo="research-mcp",
                     actor_type="service",
                     actor_id="urn:agent:service:research-mcp@0.2.0",
@@ -628,8 +629,8 @@ def create_mcp(
             try:
                 result["epistemic_status"] = epistemic_surface(
                     store_paper_id,
+                    store=corpus_store(),
                     retraction_status=paper_meta.get("retraction_status", "unknown"),
-                    db_path=paper_store.graph_db_path(),
                 )
             except Exception as exc:  # noqa: BLE001 — enrichment must never break fetch
                 log.warning(
