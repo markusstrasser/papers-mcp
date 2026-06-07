@@ -10,7 +10,7 @@ dependencies = [
     "pymupdf>=1.25",
     "google-genai>=1.0",
     "exa-py>=2.6",
-    "duckdb>=1.0",
+    "duckdb>=1.5.3",
     "corpus-core",
 ]
 
