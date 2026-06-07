@@ -3,6 +3,7 @@
 Tests the (paper_id-returning) download_paper / download_url / extract_text
 signatures.
 """
+
 import json
 from pathlib import Path
 
@@ -11,10 +12,10 @@ import pytest
 import respx
 from fastmcp import Client
 
-from corpus_core import store as ps
 from corpus_core.ingest import ingest_pdf
 
 from research_mcp.discovery import S2_BASE
+from research_mcp.papers import corpus_store
 from research_mcp.server import create_mcp
 
 
@@ -62,14 +63,15 @@ def mcp(data_dir, selve_root, corpus_root):
 def _seed_paper(doi: str, text: str) -> str:
     """Pre-populate the store with a tiny PDF + parsed.<parser_id>/page.md."""
     import tempfile
+
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
         f.write(b"%PDF-1.4\n%fake pdf bytes for tests\n%%EOF\n")
         pdf_path = Path(f.name)
-    meta = ingest_pdf(pdf_path, doi=doi, skip_parse=True)
+    meta = ingest_pdf(corpus_store(), pdf_path, doi=doi, skip_parse=True)
     paper_id = meta["paper_id"]
     # Write parsed.test@1/page.md so extract_text resolves on the local path
     # (Phase 1.5 immutable parsed dirs).
-    parsed = ps.paper_path(paper_id) / "parsed.test@1"
+    parsed = corpus_store().paper_path(paper_id) / "parsed.test@1"
     parsed.mkdir(parents=True, exist_ok=True)
     (parsed / "page.md").write_text(text, encoding="utf-8")
     pdf_path.unlink(missing_ok=True)
@@ -99,7 +101,12 @@ async def test_fetch_paper_returns_and_persists_quality(mcp, monkeypatch, corpus
         return_value=httpx.Response(200, json=FAKE_PAPER)
     )
     respx.get(f"https://api.crossref.org/works/{doi}").mock(
-        return_value=httpx.Response(200, json={"message": {"title": ["Normal paper"], "update-to": [], "relation": {}}})
+        return_value=httpx.Response(
+            200,
+            json={
+                "message": {"title": ["Normal paper"], "update-to": [], "relation": {}}
+            },
+        )
     )
     respx.get(f"https://api.openalex.org/works/doi:{doi}").mock(
         return_value=httpx.Response(200, json={"funders": [{"display_name": "NIH"}]})
@@ -113,7 +120,10 @@ async def test_fetch_paper_returns_and_persists_quality(mcp, monkeypatch, corpus
         assert fetch_data["doi"] == doi
         assert fetch_data["store_paper_id"] == expected_paper_id
         assert fetch_data["pdf"] == "paper.pdf"
-        assert fetch_data["title"] == "Association of 5-HTTLPR polymorphism with depression risk"
+        assert (
+            fetch_data["title"]
+            == "Association of 5-HTTLPR polymorphism with depression risk"
+        )
         assert fetch_data["quality_status"] == "assessed"
         assert fetch_data["quality"]["is_candidate_gene"] is True
         assert fetch_data["quality"]["vetoed"] is True

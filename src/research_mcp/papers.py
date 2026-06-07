@@ -11,7 +11,6 @@ Extraction pipeline (in order):
   3. PyMuPDF raw text (last-resort offline fallback)
 """
 
-import functools
 import logging
 import os
 import re
@@ -28,16 +27,20 @@ from corpus_core.store import CorpusStore
 logger = logging.getLogger(__name__)
 
 
-@functools.lru_cache(maxsize=1)
 def corpus_store() -> CorpusStore:
     """Process-boundary corpus handle.
 
     corpus_core uses explicit store injection (no module-level default root);
-    research-mcp resolves the root once here, at its boundary. Root = CORPUS_ROOT
-    env var, else the canonical ~/Projects/corpus.
+    research-mcp resolves the root at its boundary. Root = CORPUS_ROOT env var,
+    else the canonical ~/Projects/corpus. NOT cached — CORPUS_ROOT can change
+    in-process (tests redirect it per-case); a cached handle would go stale and
+    leak one root into another context. Construction is trivial.
     """
     root = os.environ.get("CORPUS_ROOT")
-    return CorpusStore(Path(root).expanduser() if root else Path("~/Projects/corpus").expanduser())
+    return CorpusStore(
+        Path(root).expanduser() if root else Path("~/Projects/corpus").expanduser()
+    )
+
 
 SCIHUB_MIRRORS = [
     "https://sci-hub.ru",
@@ -50,7 +53,12 @@ _UA = {"User-Agent": "Mozilla/5.0"}
 
 def _auto_parse_enabled() -> bool:
     """RESEARCH_MCP_AUTO_PARSE=0 disables marker invocation (smoke/test path)."""
-    return os.environ.get("RESEARCH_MCP_AUTO_PARSE", "1") not in ("0", "false", "False", "")
+    return os.environ.get("RESEARCH_MCP_AUTO_PARSE", "1") not in (
+        "0",
+        "false",
+        "False",
+        "",
+    )
 
 
 def download_paper(doi: str) -> Optional[str]:
@@ -90,7 +98,9 @@ _DOI_URL_PATTERNS = [
     # Generic doi.org redirects
     re.compile(r"doi\.org/(10\.[^/?#\s]+/[^?#\s]+)", re.I),
 ]
-_ARXIV_PATTERN = re.compile(r"arxiv\.org/(?:pdf|abs)/([\w.\-]+?)(?:v\d+)?(?:\.pdf)?(?:[?#]|$)", re.I)
+_ARXIV_PATTERN = re.compile(
+    r"arxiv\.org/(?:pdf|abs)/([\w.\-]+?)(?:v\d+)?(?:\.pdf)?(?:[?#]|$)", re.I
+)
 _PMID_PATTERN = re.compile(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)", re.I)
 
 
@@ -154,7 +164,9 @@ def _ingest(pdf_path: Path, **id_fields) -> Optional[str]:
     # redundant — drop it.
     id_fields.pop("pdf_sha", None)
     try:
-        meta = ingest_pdf(corpus_store(), pdf_path, skip_parse=not _auto_parse_enabled(), **id_fields)
+        meta = ingest_pdf(
+            corpus_store(), pdf_path, skip_parse=not _auto_parse_enabled(), **id_fields
+        )
         return meta["paper_id"]
     except Exception as e:
         logger.warning("ingest_pdf failed for %s: %s", pdf_path.name, e)
@@ -188,6 +200,7 @@ def extract_text(paper_id: str) -> str:
     # 2. Gemini fallback via corpus_core (sole owner of LLM extraction now)
     try:
         from corpus_core.extract import pdf_llm
+
         result = pdf_llm.extract(pdf_path)
         if len(result.parsed_markdown) >= 100:
             return result.parsed_markdown

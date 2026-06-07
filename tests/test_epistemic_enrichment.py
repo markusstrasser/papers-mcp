@@ -11,6 +11,7 @@ CORPUS_ROOT is redirected to a per-test tmpdir (the `corpus_root` fixture), so
 graph.duckdb reads/writes here NEVER touch the live ~/Projects/corpus. store_root()
 and graph_db_path() both resolve CORPUS_ROOT at call time.
 """
+
 import json
 import tempfile
 from pathlib import Path
@@ -20,11 +21,11 @@ import pytest
 import respx
 from fastmcp import Client
 
-from corpus_core import store as ps
 from corpus_core.annotate import annotate as corpus_annotate
 from corpus_core.ingest import ingest_pdf
 
 from research_mcp.discovery import S2_BASE
+from research_mcp.papers import corpus_store
 from research_mcp.server import create_mcp
 
 
@@ -78,9 +79,9 @@ def _seed_paper(doi: str, text: str) -> str:
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
         f.write(b"%PDF-1.4\n%fake pdf bytes for tests\n%%EOF\n")
         pdf_path = Path(f.name)
-    meta = ingest_pdf(pdf_path, doi=doi, skip_parse=True)
+    meta = ingest_pdf(corpus_store(), pdf_path, doi=doi, skip_parse=True)
     paper_id = meta["paper_id"]
-    parsed = ps.paper_path(paper_id) / "parsed.test@1"
+    parsed = corpus_store().paper_path(paper_id) / "parsed.test@1"
     parsed.mkdir(parents=True, exist_ok=True)
     (parsed / "page.md").write_text(text, encoding="utf-8")
     pdf_path.unlink(missing_ok=True)
@@ -93,7 +94,10 @@ def _stub_metadata_routes(doi: str) -> None:
     )
     respx.get(f"https://api.crossref.org/works/{doi}").mock(
         return_value=httpx.Response(
-            200, json={"message": {"title": ["Normal paper"], "update-to": [], "relation": {}}}
+            200,
+            json={
+                "message": {"title": ["Normal paper"], "update-to": [], "relation": {}}
+            },
         )
     )
     respx.get(f"https://api.openalex.org/works/doi:{doi}").mock(
@@ -119,6 +123,7 @@ async def test_fetch_paper_carries_epistemic_status(mcp, monkeypatch, corpus_roo
     # (1) an active verdict attestation:
     corpus_annotate(
         store_paper_id,
+        store=corpus_store(),
         repo="genomics",
         actor_type="service",
         actor_id="urn:agent:service:test@0",
@@ -128,6 +133,7 @@ async def test_fetch_paper_carries_epistemic_status(mcp, monkeypatch, corpus_roo
     # (2) an active refute relation whose OBJECT is this source (=> conflict fires):
     corpus_annotate(
         store_paper_id,
+        store=corpus_store(),
         repo="genomics",
         actor_type="service",
         actor_id="urn:agent:service:test@0",
@@ -140,9 +146,7 @@ async def test_fetch_paper_carries_epistemic_status(mcp, monkeypatch, corpus_roo
         },
     )
 
-    monkeypatch.setattr(
-        "research_mcp.server.download_paper", lambda d: store_paper_id
-    )
+    monkeypatch.setattr("research_mcp.server.download_paper", lambda d: store_paper_id)
     _stub_metadata_routes(doi)
 
     async with Client(mcp) as client:
@@ -183,16 +187,15 @@ async def test_enrichment_failure_is_swallowed(mcp, monkeypatch, corpus_root):
     extracted = "Some unrelated paper with no corpus epistemic state."
     store_paper_id = _seed_paper(doi, extracted)
 
-    monkeypatch.setattr(
-        "research_mcp.server.download_paper", lambda d: store_paper_id
-    )
-    # Force a hard failure inside the enrichment block.
-    def _boom() -> Path:
+    monkeypatch.setattr("research_mcp.server.download_paper", lambda d: store_paper_id)
+
+    # Force a hard failure inside the enrichment block. epistemic_surface is the
+    # enrichment entry point on the fetch path; making it raise exercises the
+    # swallow-and-continue guard regardless of its internals.
+    def _boom(*_args, **_kwargs) -> Path:
         raise RuntimeError("graph db unavailable")
 
-    monkeypatch.setattr(
-        "research_mcp.server.paper_store.graph_db_path", _boom
-    )
+    monkeypatch.setattr("research_mcp.server.epistemic_surface", _boom)
     _stub_metadata_routes(doi)
 
     async with Client(mcp) as client:
@@ -222,9 +225,7 @@ async def test_clean_paper_has_no_conflict(mcp, monkeypatch, corpus_root):
     extracted = "A clean paper, no verdicts, no refutations."
     store_paper_id = _seed_paper(doi, extracted)
 
-    monkeypatch.setattr(
-        "research_mcp.server.download_paper", lambda d: store_paper_id
-    )
+    monkeypatch.setattr("research_mcp.server.download_paper", lambda d: store_paper_id)
     _stub_metadata_routes(doi)
 
     async with Client(mcp) as client:
