@@ -13,6 +13,50 @@ POLL_INTERVAL = 10  # seconds between status checks
 DEFAULT_TIMEOUT = 600  # 10 minutes
 
 
+def _extract_from_steps(steps) -> tuple[list[str], list[dict], list[str]]:
+    """Pull report text, citations, and thinking summaries from an Interaction.
+
+    google-genai 2.x restructured the response: the flat 1.x `interaction.outputs`
+    (items with .type/.text/.annotations) became `interaction.steps` — a union
+    discriminated by `.type`. Report text + citations now live inside
+    ModelOutputStep.content[] → TextContent(.text, .annotations); thinking is
+    ThoughtStep.summary. Defensive getattr so a schema tweak degrades, not crashes.
+    """
+    report_parts: list[str] = []
+    citations: list[dict] = []
+    thinking_parts: list[str] = []
+    for step in steps or []:
+        stype = getattr(step, "type", None)
+        if stype == "model_output":
+            for part in getattr(step, "content", None) or []:
+                if getattr(part, "type", None) != "text":
+                    continue
+                report_parts.append(getattr(part, "text", "") or "")
+                for ann in getattr(part, "annotations", None) or []:
+                    url = (getattr(ann, "url", None) or getattr(ann, "uri", None)
+                           or getattr(ann, "source", None))
+                    if url:
+                        citations.append({
+                            "url": url,
+                            "start": getattr(ann, "start_index", None),
+                            "end": getattr(ann, "end_index", None),
+                        })
+        elif stype == "thought":
+            summary = getattr(step, "summary", None)
+            if summary:
+                thinking_parts.append(summary if isinstance(summary, str) else str(summary))
+    return report_parts, citations, thinking_parts
+
+
+def _dedupe_citations(citations: list[dict]) -> list[dict]:
+    seen, unique = set(), []
+    for c in citations:
+        if c["url"] not in seen:
+            seen.add(c["url"])
+            unique.append(c)
+    return unique
+
+
 async def run_deep_research(
     query: str,
     *,
@@ -77,34 +121,10 @@ async def run_deep_research(
             "error": f"Research ended with status: {interaction.status}",
         }
 
-    # Extract text and citations from outputs
-    report_parts = []
-    citations = []
-    thinking_parts = []
-
-    for output in interaction.outputs or []:
-        if output.type == "text":
-            report_parts.append(output.text)
-            for ann in output.annotations or []:
-                url = getattr(ann, "url", None) or ann.source
-                if url:
-                    citations.append({
-                        "url": url,
-                        "start": ann.start_index,
-                        "end": ann.end_index,
-                    })
-        elif output.type == "thought":
-            thinking_parts.append(output.text if hasattr(output, "text") else str(output))
-
+    # Extract text and citations from steps (google-genai 2.x response shape)
+    report_parts, citations, thinking_parts = _extract_from_steps(interaction.steps)
     report = "\n".join(report_parts)
-
-    # Dedupe citations by URL
-    seen = set()
-    unique_citations = []
-    for c in citations:
-        if c["url"] not in seen:
-            seen.add(c["url"])
-            unique_citations.append(c)
+    unique_citations = _dedupe_citations(citations)
 
     # Usage stats
     usage = {}
@@ -143,19 +163,10 @@ async def get_deep_research(interaction_id: str) -> dict:
         "interaction_id": interaction_id,
     }
 
-    if interaction.status == "completed" and interaction.outputs:
-        report_parts = []
-        citations = []
-        for output in interaction.outputs:
-            if output.type == "text":
-                report_parts.append(output.text)
-                for ann in output.annotations or []:
-                    url = getattr(ann, "url", None) or ann.source
-                    if url:
-                        citations.append({"url": url})
+    if interaction.status == "completed" and getattr(interaction, "steps", None):
+        report_parts, citations, _ = _extract_from_steps(interaction.steps)
         result["report"] = "\n".join(report_parts)
         result["report_chars"] = len(result["report"])
-        seen = set()
-        result["citations"] = [c for c in citations if c["url"] not in seen and not seen.add(c["url"])]
+        result["citations"] = _dedupe_citations(citations)
 
     return result
