@@ -27,6 +27,9 @@ research-mcp = "research_mcp.server:main"
 packages = ["src/research_mcp"]
 
 [tool.pyright]
+# venv resolution so imports resolve (diagnostic-channel hygiene)
+venvPath = "."
+venv = ".venv"
 typeCheckingMode = "basic"
 exclude = ["data/"]
 
