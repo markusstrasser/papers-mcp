@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-corpus-core = { path = "../agent-infra/scripts/corpus/packages/corpus-core", editable = true }
+corpus-core = { path = "../substrate/packages/corpus-core", editable = true }
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "respx>=0.22"]
