@@ -79,10 +79,14 @@ def download_paper(doi: str) -> Optional[str]:
         dest = td_path / safe_name
 
         pdf_path: Optional[Path] = None
-        for base_url in SCIHUB_MIRRORS:
-            pdf_path = _try_scihub(doi, base_url, dest)
-            if pdf_path:
-                break
+        arxiv_pdf = _arxiv_pdf_url(doi)
+        if arxiv_pdf:  # arXiv: go straight to the real PDF (Sci-Hub/doi.org can't serve it)
+            pdf_path = _download_url(arxiv_pdf, dest)
+        if not pdf_path:
+            for base_url in SCIHUB_MIRRORS:
+                pdf_path = _try_scihub(doi, base_url, dest)
+                if pdf_path:
+                    break
         if not pdf_path:
             pdf_path = _download_url(f"https://doi.org/{doi}", dest)
         if not pdf_path:
@@ -102,6 +106,15 @@ _ARXIV_PATTERN = re.compile(
     r"arxiv\.org/(?:pdf|abs)/([\w.\-]+?)(?:v\d+)?(?:\.pdf)?(?:[?#]|$)", re.I
 )
 _PMID_PATTERN = re.compile(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)", re.I)
+_ARXIV_DOI_PATTERN = re.compile(r"10\.48550/arxiv\.([\w.\-]+)", re.I)
+
+
+def _arxiv_pdf_url(doi: Optional[str]) -> Optional[str]:
+    """arXiv papers aren't on Sci-Hub and doi.org redirects to the abs PAGE (HTML, not a PDF),
+    so the generic chain fails on every arXiv ID (recurring gotcha — researchers fell back to
+    ar5iv HTML by hand). The real PDF is one URL away; construct it directly."""
+    m = _ARXIV_DOI_PATTERN.search(doi or "")
+    return f"https://arxiv.org/pdf/{m.group(1)}" if m else None
 
 
 def _derive_id_from_url(url: str) -> dict:
@@ -145,7 +158,9 @@ def download_url(url: str, name: Optional[str] = None) -> Optional[str]:
             safe_name += ".pdf"
         dest = td_path / safe_name
 
-        pdf_path = _download_url(url, dest)
+        # An arXiv abs/pdf URL -> canonical /pdf/ (an /abs/ URL returns HTML, not a PDF).
+        fetch_url = _arxiv_pdf_url(derived.get("doi")) or url
+        pdf_path = _download_url(fetch_url, dest)
         if not pdf_path:
             return None
 

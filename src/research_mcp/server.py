@@ -465,7 +465,9 @@ def create_mcp(
     ) -> dict:
         """Download a paper's PDF and extract full text.
 
-        Tries Sci-Hub first (most reliable for paywalled papers), then OA.
+        arXiv papers (DOI 10.48550/arXiv.* or an arxiv.org URL) go straight to the
+        real arxiv.org/pdf URL — this now WORKS, no ar5iv/curl workaround needed.
+        Otherwise tries Sci-Hub first (most reliable for paywalled papers), then OA.
         The paper must be saved to the corpus first (via save_paper), OR
         provide a DOI/URL directly.
 
