@@ -39,6 +39,7 @@ data/pdfs/
 .claude/overview.conf
 .claude/overview-marker-*
 .claude/overviews/source-overview.md
+.claude/maps/
 
 # ---- Secrets ----
 .env
