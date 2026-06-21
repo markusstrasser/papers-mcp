@@ -39,6 +39,8 @@ data/pdfs/
 .claude/overview.conf
 .claude/overview-marker-*
 .claude/overviews/source-overview.md
+# Generated codebase maps (refresh-maps / pre-commit / launchd) — never track
+.claude/rules/codebase-map.md
 .claude/maps/
 
 # ---- Secrets ----
